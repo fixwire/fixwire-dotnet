@@ -4,7 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
-    <NoWarn>$(NoWarn);CA1848;CA1515;CA1050</NoWarn>
+    <NoWarn>$(NoWarn);CA1848;CA1873;CA1515;CA1050</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Fixwire.Extensions.Hosting/Fixwire.Extensions.Hosting.csproj" />

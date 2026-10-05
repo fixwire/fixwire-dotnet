@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The core: every .NET app (netstandard2.0 reaches .NET Framework 4.6.2+, Unity and Xamarin too). No dependencies. -->
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <PackageId>Fixwire</PackageId>
+    <Description>Fixwire SDK for .NET: errors, traces, release health, cron monitors and feedback.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsAotCompatible Condition="'$(TargetFramework)' == 'net8.0'">true</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fixwire.Tests" />
+    <InternalsVisibleTo Include="Fixwire.AspNetCore" />
+    <InternalsVisibleTo Include="Fixwire.Extensions.Hosting" />
+  </ItemGroup>
+</Project>

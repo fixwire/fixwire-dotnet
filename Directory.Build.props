@@ -1,0 +1,17 @@
+<Project>
+  <!-- Every project: the newest C#, nullable references, warnings as errors. -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <Version>0.1.0</Version>
+    <Authors>Fixwire</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://fixwire.io</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/fixwire/fixwire</RepositoryUrl>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>

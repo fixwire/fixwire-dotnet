@@ -1,0 +1,26 @@
+# The .NET SDK's own settings (dotnet format and the analyzers read them).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{csproj,props,targets,slnx,json,yml}]
+indent_size = 2
+
+[*.cs]
+csharp_style_namespace_declarations = file_scoped:warning
+csharp_prefer_braces = true:warning
+dotnet_sort_system_directives_first = true
+
+# The core also targets netstandard2.0, which lacks the newer APIs these suggest.
+dotnet_diagnostic.CA1846.severity = none
+dotnet_diagnostic.CA1847.severity = none
+dotnet_diagnostic.CA1850.severity = none
+dotnet_diagnostic.CA1865.severity = none
+dotnet_diagnostic.CA1866.severity = none
+dotnet_diagnostic.CA2249.severity = none

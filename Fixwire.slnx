@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Fixwire.AspNetCore/Fixwire.AspNetCore.csproj" />
+    <Project Path="src/Fixwire.Extensions.Hosting/Fixwire.Extensions.Hosting.csproj" />
+    <Project Path="src/Fixwire/Fixwire.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Fixwire.Tests/Fixwire.Tests.csproj" />
+  </Folder>
+</Solution>

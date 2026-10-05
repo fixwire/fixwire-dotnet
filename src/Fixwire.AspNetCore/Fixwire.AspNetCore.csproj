@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- ASP.NET Core apps: a scope, crash reporting, release health and a server span per request. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>Fixwire.AspNetCore</PackageId>
+    <Description>Fixwire for ASP.NET Core: each request's scope, crashes, release health and server span, plus everything Fixwire.Extensions.Hosting sets up.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../Fixwire.Extensions.Hosting/Fixwire.Extensions.Hosting.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fixwire.Tests" />
+  </ItemGroup>
+</Project>

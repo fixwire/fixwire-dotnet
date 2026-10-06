@@ -3,3 +3,8 @@ obj/
 TestResults/
 *.user
 .vs/
+
+.DS_Store
+.env
+.env.*
+!.env.example

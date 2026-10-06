@@ -27,7 +27,15 @@ public sealed class FixwireOptions
     /// <summary>The share of new traces kept (default 0: no tracing). Traces continued from a caller follow its decision.</summary>
     public double TracesSampleRate { get; set; }
 
-    /// <summary>The URLs outgoing requests carry trace headers to: those holding one of these strings (default none).</summary>
+    /// <summary>
+    /// Where outgoing requests carry trace headers (default nowhere). A URL is compared without its
+    /// user info, query and fragment: a target with <c>://</c> matches URLs that start with it
+    /// (<c>https://api.example.com/v2</c>); one starting with <c>/</c> matches relative URLs whose
+    /// path starts with it; any other is a host, with a port if it has one (<c>example.com</c>,
+    /// <c>localhost:5000</c>), and matches that host and its subdomains in any case:
+    /// <c>example.com</c> matches <c>api.example.com</c>, not <c>badexample.com</c> or
+    /// <c>example.com.evil.net</c>.
+    /// </summary>
     public IList<string> TracePropagationTargets { get; set; } = new List<string>();
 
     /// <summary>Changes an event before it is sent, or drops it by returning null.</summary>
@@ -38,6 +46,16 @@ public sealed class FixwireOptions
 
     /// <summary>The breadcrumbs kept per scope (default 100).</summary>
     public int MaxBreadcrumbs { get; set; } = 100;
+
+    /// <summary>
+    /// The longest string sent, in bytes of UTF-8 (default 1,024): a longer one is cut on a
+    /// character and ends in <c>...</c>, within the limit. Redaction runs before the cut, over 16 kB
+    /// more, so a secret the cut goes through is still masked.
+    /// </summary>
+    public int MaxValueLength { get; set; } = DefaultMaxValueLength;
+
+    /// <summary>The frames sent per exception (default 100): the newest, nearest where it was thrown.</summary>
+    public int MaxStackFrames { get; set; } = 100;
 
     /// <summary>Whether to send the user's IP address and identifying request headers (off by default).</summary>
     public bool SendDefaultPii { get; set; }
@@ -60,7 +78,7 @@ public sealed class FixwireOptions
     /// <summary>Namespace prefixes that are not your code.</summary>
     public IList<string> InAppExclude { get; set; } = new List<string>();
 
-    /// <summary>The requests waiting to be sent (default 100); past it, new ones are dropped.</summary>
+    /// <summary>The requests waiting to be sent (default 100), and as many waiting for a retry; past them, new ones are dropped.</summary>
     public int MaxQueue { get; set; } = 100;
 
     /// <summary>The timeout of a request to Fixwire (default 10 s).</summary>
@@ -101,6 +119,11 @@ public sealed class FixwireOptions
         }
         TracesSampleRate = TracesSampleRate is > 0 ? Math.Min(TracesSampleRate, 1) : 0;
         MaxBreadcrumbs = Math.Max(MaxBreadcrumbs, 0);
+        MaxValueLength = MaxValueLength <= 0 ? DefaultMaxValueLength : Math.Max(MaxValueLength, 3); // room for the "..."
+        if (MaxStackFrames <= 0)
+        {
+            MaxStackFrames = 100;
+        }
         if (MaxQueue <= 0)
         {
             MaxQueue = 100;
@@ -118,6 +141,8 @@ public sealed class FixwireOptions
             ShutdownTimeout = TimeSpan.FromSeconds(2); // Timeout.InfiniteTimeSpan would hang the exit
         }
     }
+
+    internal const int DefaultMaxValueLength = 1024;
 
     internal bool SessionsOn => AutoSessionTracking && !Empty(Release);
 

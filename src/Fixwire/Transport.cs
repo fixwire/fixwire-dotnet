@@ -23,8 +23,10 @@ internal sealed class Transport : IDisposable
 
     public static readonly TimeSpan MaxWait = TimeSpan.FromMinutes(5);
 
-    /// <summary>The longest pause Fixwire-Rate-Limits may ask for.</summary>
+    /// <summary>The longest pause an answer may ask for (Retry-After, Fixwire-Rate-Limits): longer ones are a day.</summary>
     private const long MaxPauseSeconds = 24 * 60 * 60;
+
+    private static readonly TimeSpan MaxPause = TimeSpan.FromSeconds(MaxPauseSeconds);
 
     /// <summary>The kinds of data Fixwire-Rate-Limits may name; it names no others (and "" is all of them).</summary>
     private static readonly HashSet<string> Categories = new(StringComparer.Ordinal)
@@ -34,7 +36,7 @@ internal sealed class Transport : IDisposable
 
     private static readonly char[] Colon = [':'];
 
-    /// <summary>The first retry's wait, halved (tests shorten it).</summary>
+    /// <summary>The first retry's wait; each next one waits twice as long (tests shorten it).</summary>
     internal static TimeSpan BackoffUnit { get; set; } = TimeSpan.FromSeconds(1);
 
     private sealed class Item(string path, string category, byte[] body)
@@ -54,7 +56,8 @@ internal sealed class Transport : IDisposable
     private readonly object _lock = new();
     private readonly Dictionary<string, DateTimeOffset> _paused = new(); // category ("" for all) → until
     private readonly Task _worker;
-    private int _pending;
+    private int _pending; // queued, being sent or waiting: what a flush waits for
+    private int _retrying; // of them, waiting for a retry
     private TaskCompletionSource<bool> _idle = NewIdle(done: true);
 
     public Transport(Dsn dsn, FixwireOptions options)
@@ -90,12 +93,12 @@ internal sealed class Transport : IDisposable
         }
     }
 
-    /// <summary>Queues a request; false when the queue is full or closed.</summary>
+    /// <summary>Queues a request; false when the queue is full (MaxQueue, retries apart) or closed.</summary>
     public bool Send(string path, string category, byte[] body)
     {
         lock (_lock)
         {
-            if (_stop.IsCancellationRequested || _pending >= _options.MaxQueue)
+            if (_stop.IsCancellationRequested || _pending - _retrying >= _options.MaxQueue)
             {
                 Log($"dropping a {category} request: {(_stop.IsCancellationRequested ? "closed" : "the queue is full")}");
                 return false;
@@ -136,10 +139,17 @@ internal sealed class Transport : IDisposable
         idle?.TrySetResult(true);
     }
 
-    private void Later(Item item, TimeSpan wait) =>
+    private void Later(Item item, TimeSpan wait, bool retry = false) =>
         _ = Task.Delay(wait, _stop.Token).ContinueWith(
             t =>
             {
+                if (retry)
+                {
+                    lock (_lock)
+                    {
+                        _retrying--;
+                    }
+                }
                 if (t.IsCanceled)
                 {
                     Done(); // closed: dropped
@@ -161,9 +171,9 @@ internal sealed class Transport : IDisposable
             {
                 await _ready.WaitAsync(_stop.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException)
             {
-                break;
+                break; // closed (and perhaps disposed of before this loop saw it)
             }
             if (!_queue.TryDequeue(out var item))
             {
@@ -244,7 +254,7 @@ internal sealed class Transport : IDisposable
                 Done();
                 return;
             }
-            var backoff = TimeSpan.FromTicks(BackoffUnit.Ticks * (1L << item.Attempts));
+            var backoff = TimeSpan.FromTicks(BackoffUnit.Ticks * (1L << (item.Attempts - 1))); // about 1 s, 2 s, 4 s
             var later = backoff > retryAfter ? backoff : retryAfter;
             if (later > MaxWait)
             {
@@ -253,7 +263,22 @@ internal sealed class Transport : IDisposable
                 Done();
                 return;
             }
-            Later(item, later);
+            bool full;
+            lock (_lock)
+            {
+                full = _retrying >= _options.MaxQueue;
+                if (!full)
+                {
+                    _retrying++;
+                }
+            }
+            if (full)
+            {
+                Log($"dropping a {item.Category} request: {_options.MaxQueue} wait for a retry already");
+                Done();
+                return;
+            }
+            Later(item, later, retry: true);
         }
         else
         {
@@ -281,22 +306,59 @@ internal sealed class Transport : IDisposable
         // Only the status and headers are read: the body is never buffered, whatever its size.
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _stop.Token).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow;
-        var retryAfter = RetryAfter(response.Headers.RetryAfter, now);
+        var status = (int)response.StatusCode;
+        var retryAfter = RetryAfter(response.Headers, now);
         string? limits = response.Headers.TryGetValues("Fixwire-Rate-Limits", out var v) ? string.Join(",", v) : null;
         Limit(limits, now);
-        if ((int)response.StatusCode == 429 && limits == null)
+        if (status == 429 && limits == null)
         {
-            var secs = Math.Max((long)retryAfter.TotalSeconds, 60);
+            // Everything waits, at least a minute.
+            var secs = Math.Max((long)Math.Ceiling(retryAfter.TotalSeconds), 60);
             Limit(secs.ToString(CultureInfo.InvariantCulture) + ":", now);
         }
-        return ((int)response.StatusCode, retryAfter);
+        else if (status >= 500 && retryAfter > TimeSpan.Zero)
+        {
+            Limit(((long)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture) + ":", now);
+        }
+        return (status, retryAfter);
     }
 
-    /// <summary>Retry-After as a wait: seconds or an HTTP date, never negative.</summary>
-    internal static TimeSpan RetryAfter(RetryConditionHeaderValue? header, DateTimeOffset now)
+    /// <summary>
+    /// Retry-After as a wait: seconds or an HTTP date, at most a day (more is a day); zero when
+    /// absent, past or broken.
+    /// </summary>
+    internal static TimeSpan RetryAfter(HttpResponseHeaders headers, DateTimeOffset now)
     {
-        var wait = header?.Delta ?? (header?.Date is { } date ? date - now : TimeSpan.Zero);
-        return wait > TimeSpan.Zero ? wait : TimeSpan.Zero;
+        TimeSpan wait;
+        if (headers.TryGetValues("Retry-After", out var values) && Seconds(values.First(), out var secs))
+        {
+            wait = TimeSpan.FromSeconds(secs); // read here: .NET's parser takes no more than int's seconds
+        }
+        else
+        {
+            wait = headers.RetryAfter?.Date is { } date ? date - now : TimeSpan.Zero;
+        }
+        return wait <= TimeSpan.Zero ? TimeSpan.Zero : wait > MaxPause ? MaxPause : wait;
+    }
+
+    /// <summary>Whole seconds, at most a day (more digits than a long holds too); false for anything but digits.</summary>
+    private static bool Seconds(string s, out long secs)
+    {
+        s = s.Trim();
+        secs = 0;
+        if (s.Length == 0)
+        {
+            return false;
+        }
+        foreach (var c in s)
+        {
+            if (c is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+        secs = long.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? Math.Min(n, MaxPauseSeconds) : MaxPauseSeconds;
+        return true;
     }
 
     /// <summary>Reads <c>&lt;seconds&gt;:&lt;category;…&gt;, …</c>; no categories means all.</summary>
@@ -311,11 +373,11 @@ internal sealed class Transport : IDisposable
             foreach (var part in header!.Split(','))
             {
                 var sc = part.Trim().Split(Colon, 2);
-                if (!long.TryParse(sc[0].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var secs) || secs <= 0)
+                if (!Seconds(sc[0], out var secs) || secs <= 0)
                 {
                     continue;
                 }
-                var until = now.AddSeconds(Math.Min(secs, MaxPauseSeconds));
+                var until = now.AddSeconds(secs);
                 var cats = sc.Length > 1 ? sc[1].Trim() : "";
                 foreach (var cat in cats.Length == 0 ? new[] { "" } : cats.Split(';'))
                 {
@@ -349,12 +411,15 @@ internal sealed class Transport : IDisposable
         return done == idle;
     }
 
-    public void Dispose()
+    public void Dispose() => Close(TimeSpan.FromSeconds(1));
+
+    /// <summary>Stops sending, waiting at most so long for the loop to end.</summary>
+    public void Close(TimeSpan wait)
     {
         _stop.Cancel();
         try
         {
-            _worker.Wait(TimeSpan.FromSeconds(1));
+            _worker.Wait(wait);
         }
         catch (AggregateException)
         {

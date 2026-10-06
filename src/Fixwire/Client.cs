@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Text;
-using System.Text.RegularExpressions;
 using Fixwire.Internal;
 using Fixwire.Redaction;
 
@@ -21,6 +20,11 @@ public sealed class Client : IDisposable
     internal const int MaxEventBytes = 1 << 20;
 
     internal const int MaxSpanBytes = 5 << 20;
+
+    /// <summary>The spans a request holds at most.</summary>
+    internal const int MaxSpansPerRequest = 100;
+
+    private static readonly char[] QueryOrFragment = ['?', '#'];
 
     private readonly Transport? _transport;
     private readonly Redactor? _redactor;
@@ -61,18 +65,100 @@ public sealed class Client : IDisposable
 
     internal Transport? Transport => _transport;
 
-    /// <summary>Whether trace headers may go to a URL: it holds one of the trace propagation targets.</summary>
+    /// <summary>
+    /// Whether trace headers may go to a URL: it matches one of the trace propagation targets (see
+    /// <see cref="FixwireOptions.TracePropagationTargets"/>), compared without its user info, query
+    /// and fragment.
+    /// </summary>
     /// <param name="url">The request's URL.</param>
     public bool ShouldPropagate(string url)
     {
-        foreach (var t in Options.TracePropagationTargets)
+        if (string.IsNullOrEmpty(url) || Options.TracePropagationTargets is not { Count: > 0 } targets)
         {
-            if (!string.IsNullOrEmpty(t) && url.IndexOf(t, StringComparison.Ordinal) >= 0)
+            return false;
+        }
+        var compared = Compared(url);
+        var absolute = SchemeEnd(compared) > 0;
+        Uri? uri = null;
+        foreach (var t in targets)
+        {
+            if (string.IsNullOrEmpty(t))
+            {
+                continue;
+            }
+            if (t.IndexOf("://", StringComparison.Ordinal) >= 0)
+            {
+                if (compared.StartsWith(t, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            else if (t[0] == '/')
+            {
+                // A path on the same origin: only a relative URL is known to be on it.
+                if (!absolute && compared.StartsWith(t, StringComparison.Ordinal) && !compared.StartsWith("//", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            else if (absolute && (uri != null || Uri.TryCreate(compared, UriKind.Absolute, out uri)) && IsHost(uri, t))
             {
                 return true;
             }
         }
         return false;
+    }
+
+    /// <summary>A URL as trace propagation targets see it: without its query, fragment and user info.</summary>
+    internal static string Compared(string url)
+    {
+        var end = url.IndexOfAny(QueryOrFragment);
+        if (end >= 0)
+        {
+            url = url.Substring(0, end);
+        }
+        var scheme = SchemeEnd(url);
+        if (scheme > 0)
+        {
+            var host = scheme + 3;
+            var path = url.IndexOf('/', host);
+            var authority = (path < 0 ? url.Length : path) - host;
+            var at = authority > 0 ? url.LastIndexOf('@', host + authority - 1, authority) : -1;
+            if (at >= 0)
+            {
+#if NET
+                url = string.Concat(url.AsSpan(0, host), url.AsSpan(at + 1));
+#else
+                url = url.Substring(0, host) + url.Substring(at + 1);
+#endif
+            }
+        }
+        return url;
+    }
+
+    /// <summary>Where an absolute URL's "://" is; -1 for a relative one (a path that holds "://" is no scheme).</summary>
+    private static int SchemeEnd(string url)
+    {
+        var i = url.IndexOf("://", StringComparison.Ordinal);
+        return i > 0 && url.IndexOf('/') == i + 1 ? i : -1;
+    }
+
+    /// <summary>Whether a URL's host is the target's (<c>host</c> or <c>host:port</c>) or one of its subdomains, in any case.</summary>
+    private static bool IsHost(Uri uri, string target)
+    {
+        var host = target;
+        var colon = target.LastIndexOf(':');
+        if (colon > 0 && (target.IndexOf(':') == colon || target[colon - 1] == ']'))
+        {
+            if (!int.TryParse(target.Substring(colon + 1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var port) || uri.Port != port)
+            {
+                return false;
+            }
+            host = target.Substring(0, colon);
+        }
+        var h = uri.Host;
+        return h.Equals(host, StringComparison.OrdinalIgnoreCase)
+            || (h.Length > host.Length + 1 && h[h.Length - host.Length - 1] == '.' && h.EndsWith(host, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -167,14 +253,18 @@ public sealed class Client : IDisposable
         byte[] body;
         try
         {
-            body = Encode(Otlp.Logs(Options, new List<object?> { Otlp.EventRecord(e, _redactor) }));
-            if (body.Length > MaxEventBytes)
+            // Too large for the ingest: without what came before it, then without its contexts (this
+            // SDK sends no frame variables), or not at all.
+            body = EncodeEvent(e);
+            if (body.Length > MaxEventBytes && e.Breadcrumbs.Count > 0)
             {
-                // Too large for the ingest: without what came before it and the extra details, or not at all.
                 e.Breadcrumbs = new List<Breadcrumb>();
+                body = EncodeEvent(e);
+            }
+            if (body.Length > MaxEventBytes && e.Contexts.Count > 0)
+            {
                 e.Contexts = new Dictionary<string, IDictionary<string, object?>>();
-                e.Extra = new Dictionary<string, object?>();
-                body = Encode(Otlp.Logs(Options, new List<object?> { Otlp.EventRecord(e, _redactor) }));
+                body = EncodeEvent(e);
             }
         }
 #pragma warning disable CA1031 // an event that can't be encoded is dropped, not thrown at the app
@@ -191,6 +281,9 @@ public sealed class Client : IDisposable
         }
         return _transport.Send("/v1/logs", Transport.Error, body) ? e.EventId : null;
     }
+
+    private byte[] EncodeEvent(FixwireEvent e) =>
+        Encode(Otlp.Logs(Options, new List<object?> { Otlp.EventRecord(e, Options, _redactor) }));
 
     /// <summary>
     /// Reports a run of a scheduled job: <see cref="CheckInStatus.InProgress"/> when it starts, then
@@ -233,12 +326,13 @@ public sealed class Client : IDisposable
         }
         var user = scope.User;
         var id = Ids.New(16);
+        var max = Options.MaxValueLength;
         var body = new Dictionary<string, object?>();
         void Put(string key, string? value)
         {
             if (!string.IsNullOrEmpty(value))
             {
-                body[key] = Otlp.Clip(value!, Otlp.MaxString); // what a user typed may be any size
+                body[key] = Otlp.Clip(value!, max + Otlp.ReadAhead); // what a user typed may be any size
             }
         }
         Put("message", message);
@@ -249,13 +343,14 @@ public sealed class Client : IDisposable
         Put("name", f.Name ?? user?.Username);
         Put("email", f.Email ?? user?.Email);
         Put("url", f.Url);
-        try
+        // Masked, then cut: redaction reads past the cut.
+        body = Otlp.Scrub(body, _redactor);
+        foreach (var key in body.Keys.ToList())
         {
-            body = Otlp.Scrub(body, _redactor);
-        }
-        catch (RegexMatchTimeoutException)
-        {
-            return null; // not sent unmasked
+            if (body[key] is string s)
+            {
+                body[key] = Otlp.Clip(s, max);
+            }
         }
         body["sdk"] = Sdk();
         body["feedback_id"] = id;
@@ -272,6 +367,14 @@ public sealed class Client : IDisposable
     {
         if (_transport == null)
         {
+            return;
+        }
+        if (spans.Count > MaxSpansPerRequest)
+        {
+            for (var i = 0; i < spans.Count; i += MaxSpansPerRequest)
+            {
+                SendSpans(spans.GetRange(i, Math.Min(MaxSpansPerRequest, spans.Count - i)));
+            }
             return;
         }
         try
@@ -328,15 +431,17 @@ public sealed class Client : IDisposable
         return _transport.FlushAsync(timeout);
     }
 
-    /// <summary>Sends what is left (up to <see cref="FixwireOptions.ShutdownTimeout"/>) and stops.</summary>
+    /// <summary>Sends what is left and stops, within <see cref="FixwireOptions.ShutdownTimeout"/>.</summary>
     public void Dispose()
     {
         if (_transport == null)
         {
             return;
         }
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         Sessions?.Dispose();
         FlushAsync(Options.ShutdownTimeout).GetAwaiter().GetResult();
-        _transport.Dispose();
+        var left = Options.ShutdownTimeout - watch.Elapsed;
+        _transport.Close(left > TimeSpan.Zero ? left : TimeSpan.Zero);
     }
 }

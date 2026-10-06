@@ -422,17 +422,120 @@ public class FixwireTests
         Assert.True(await hub.FlushAsync(Wait));
         Assert.Single(ingest.Requests());
 
+        // Retry-After: seconds or an HTTP date, a day at most; broken or past ones are no wait.
         var now = DateTimeOffset.UtcNow;
-        Assert.Equal(TimeSpan.FromSeconds(30), Transport.RetryAfter(new RetryConditionHeaderValue(now.AddSeconds(30)), now));
-        Assert.Equal(TimeSpan.Zero, Transport.RetryAfter(new RetryConditionHeaderValue(now.AddSeconds(-30)), now));
-        Assert.Equal(TimeSpan.Zero, Transport.RetryAfter(null, now));
+        static HttpResponseHeaders RetryAfter(string value)
+        {
+            var r = new HttpResponseMessage();
+            r.Headers.TryAddWithoutValidation("Retry-After", value);
+            return r.Headers;
+        }
+        Assert.Equal(TimeSpan.FromSeconds(30), Transport.RetryAfter(RetryAfter("30"), now));
+        Assert.Equal(TimeSpan.FromDays(1), Transport.RetryAfter(RetryAfter("86400"), now));
+        Assert.Equal(TimeSpan.FromDays(1), Transport.RetryAfter(RetryAfter("86401"), now));
+        Assert.Equal(TimeSpan.FromDays(1), Transport.RetryAfter(RetryAfter("99999999999999999999999"), now));
+        var date = Transport.RetryAfter(RetryAfter(now.AddSeconds(30).ToString("r", CultureInfo.InvariantCulture)), now);
+        Assert.InRange(date, TimeSpan.FromSeconds(29), TimeSpan.FromSeconds(30));
+        Assert.Equal(TimeSpan.FromDays(1), Transport.RetryAfter(RetryAfter(now.AddDays(3).ToString("r", CultureInfo.InvariantCulture)), now));
+        foreach (var none in new[] { "-5", "soon", "", now.AddSeconds(-30).ToString("r", CultureInfo.InvariantCulture) })
+        {
+            Assert.Equal(TimeSpan.Zero, Transport.RetryAfter(RetryAfter(none), now));
+        }
+        Assert.Equal(TimeSpan.Zero, Transport.RetryAfter(new HttpResponseMessage().Headers, now));
 
         // Fixwire-Rate-Limits: past a day is a day, and categories the protocol doesn't name are let go.
         var transport = hub.Client!.Transport!;
         transport.Limit("99999999999999:error;" + string.Join(";", Enumerable.Range(0, 1000).Select(i => "c" + i)), now);
-        var paused = (System.Collections.IDictionary)typeof(Transport).GetField("_paused", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(transport)!;
-        Assert.Equal(new[] { "error" }, paused.Keys.Cast<string>());
+        transport.Limit("86401:span, 999999999999999999999999:feedback, -5:log, soon:file", now);
+        var paused = Paused(transport);
+        Assert.Equal(new[] { "", "error", "feedback", "span" }, paused.Keys.Cast<string>().Order()); // "": the 503 above paused all
         Assert.Equal(now.AddDays(1), (DateTimeOffset)paused["error"]!);
+        Assert.Equal(now.AddDays(1), (DateTimeOffset)paused["span"]!);
+        Assert.Equal(now.AddDays(1), (DateTimeOffset)paused["feedback"]!);
+    }
+
+    /// <summary>Waits until done says so, or the test's wait.</summary>
+    private static async Task UntilAsync(Func<bool> done)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!done() && sw.Elapsed < Wait)
+        {
+            await Task.Delay(10);
+        }
+    }
+
+    private static System.Collections.IDictionary Paused(Transport transport) =>
+        (System.Collections.IDictionary)typeof(Transport).GetField("_paused", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(transport)!;
+
+    [Fact]
+    public async Task PausesWhereAnswersSay()
+    {
+        Transport.BackoffUnit = TimeSpan.FromMilliseconds(10);
+        try
+        {
+            // A 5xx with Retry-After pauses all data for that long (here past the longest wait: the retry is dropped).
+            var unavailable = new FakeIngest { Answer = (_, _) => (503, new Dictionary<string, string> { ["Retry-After"] = "86401" }) };
+            var hub = unavailable.Hub();
+            hub.CaptureMessage("unavailable");
+            Assert.True(await hub.FlushAsync(Wait));
+            var paused = Paused(hub.Client!.Transport!);
+            Assert.Equal(new[] { "" }, paused.Keys.Cast<string>());
+            Assert.InRange((DateTimeOffset)paused[""]! - DateTimeOffset.UtcNow, TimeSpan.FromDays(1) - Wait, TimeSpan.FromDays(1));
+
+            // A 429 without Fixwire-Rate-Limits pauses all data for Retry-After, a minute at least.
+            var limited = new FakeIngest { Answer = (_, _) => (429, new Dictionary<string, string> { ["Retry-After"] = "5" }) };
+            var hub2 = limited.Hub();
+            hub2.CaptureMessage("limited");
+            await hub2.FlushAsync(TimeSpan.FromMilliseconds(500));
+            paused = Paused(hub2.Client!.Transport!);
+            Assert.InRange((DateTimeOffset)paused[""]! - DateTimeOffset.UtcNow, TimeSpan.FromSeconds(50), TimeSpan.FromSeconds(60));
+
+            // No answer or a 5xx: tried again 3 times, then dropped.
+            var down = new FakeIngest { Answer = (_, _) => (500, new Dictionary<string, string>()) };
+            var hub3 = down.Hub();
+            hub3.CaptureMessage("down");
+            Assert.True(await hub3.FlushAsync(Wait));
+            Assert.Equal(4, down.Requests("/v1/logs").Count);
+        }
+        finally
+        {
+            Transport.BackoffUnit = TimeSpan.FromSeconds(1);
+        }
+    }
+
+    [Fact]
+    public async Task QueuesRetriesApart()
+    {
+        // MaxQueue requests wait to be sent, and as many wait for a retry: retries don't crowd new data out.
+        Transport.BackoffUnit = TimeSpan.FromMinutes(1);
+        try
+        {
+            var ingest = new FakeIngest { Answer = (_, _) => (503, new Dictionary<string, string>()) };
+            var hub = ingest.Hub(o =>
+            {
+                o.MaxQueue = 2;
+                o.ShutdownTimeout = TimeSpan.FromMilliseconds(100);
+            });
+            var transport = hub.Client!.Transport!;
+            var body = new byte[] { (byte)'{', (byte)'}' };
+            Assert.True(transport.Send("/v1/logs", Transport.Error, body));
+            Assert.True(transport.Send("/v1/logs", Transport.Error, body));
+            await UntilAsync(() => Field("_retrying") == 2);
+            Assert.True(transport.Send("/v1/logs", Transport.Error, body)); // the queue is empty
+            Assert.True(transport.Send("/v1/logs", Transport.Error, body));
+            await UntilAsync(() => ingest.Requests().Count == 4 && Field("_pending") == 2);
+            Assert.Equal(2, Field("_retrying")); // the retries of these two had no room: dropped
+            Assert.Equal(2, Field("_pending"));
+            hub.Client.Dispose();
+            await UntilAsync(() => Field("_retrying") == 0);
+            Assert.Equal(0, Field("_pending"));
+
+            int Field(string name) => (int)typeof(Transport).GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(transport)!;
+        }
+        finally
+        {
+            Transport.BackoffUnit = TimeSpan.FromSeconds(1);
+        }
     }
 
     [Fact]
@@ -561,6 +664,16 @@ public class FixwireTests
         var hub = ingest.Hub();
         Assert.NotNull(hub.CaptureException(new UnreadableException()));
 
+        // Null keys and breadcrumbs are ignored, not thrown back.
+        hub.Scope.SetTag(null!, "x");
+        hub.Scope.SetExtra(null!, 1);
+        hub.Scope.SetContext(null!, null);
+        hub.AddBreadcrumb(null!);
+        using (var span = hub.SpanBuilder("s").WithAttribute(null!, 1).Start())
+        {
+            span.SetAttribute(null!, 1);
+        }
+
         // Messages the error budget's fingerprint used to time out on (and throw at the app).
         var sw = Stopwatch.StartNew();
         Assert.NotNull(hub.CaptureMessage("q" + new string('@', 20_000)));
@@ -592,30 +705,42 @@ public class FixwireTests
         hub.Scope.SetExtra("endless", Forever());
         hub.Scope.SetExtra("unprintable", new Unprintable());
         hub.Scope.SetExtra("long", new string('x', 100_000));
+        hub.Scope.SetExtra("wide", Enumerable.Range(0, 1000).ToDictionary(i => "k" + i, i => (object?)i));
+        hub.Scope.SetExtra("deep", Nest(12));
+        hub.Scope.SetExtra("deepList", NestList(12));
+        hub.Scope.SetExtra("numbers", new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity, 1.5 });
         var crumb = new Breadcrumb("upload", new string('z', 100_000));
         hub.AddBreadcrumb(crumb);
-        Assert.Equal(Otlp.MaxRead, crumb.Message!.Length); // kept no larger than an event reads
+        Assert.Equal(1024 + Otlp.ReadAhead, crumb.Message!.Length); // kept no larger than an event reads
         Assert.NotNull(hub.CaptureMessage("bounded"));
         await hub.FlushAsync(Wait);
         var a = Kv(LogRecords(ingest.Requests("/v1/logs"))[0]["attributes"]);
         Assert.Equal("[Circular ~]", Map(a["cycle"])["k0"]);
-        Assert.Equal(1000, List(a["endless"]).Count);
+        Assert.Equal(100, List(a["endless"]).Count);
+        Assert.Equal(100, Map(a["wide"]).Count);
         Assert.Equal("[Unreadable]", a["unprintable"]);
-        Assert.Equal(new string('x', Otlp.MaxString - 3) + "...", a["long"]);
-        Assert.Equal(Otlp.MaxString, ((string)Map(List(a["fixwire.breadcrumbs"])[0])["message"]!).Length);
+        Assert.Equal(new string('x', 1021) + "...", a["long"]);
+        Assert.Equal(new string('z', 1021) + "...", Map(List(a["fixwire.breadcrumbs"])[0])["message"]);
+        Assert.Equal(new object?[] { "NaN", "Infinity", "-Infinity", 1.5 }, List(a["numbers"]));
 
-        // Past the ingest's 1 MB, an event goes without its extra details.
-        var large = new FakeIngest();
-        var big = large.Hub();
-        for (var i = 0; i < 100; i++)
+        // Ten levels a value: the eleventh is "[Object]" or "[Array]".
+        var level = a["deep"];
+        for (var i = 1; i < 10; i++)
         {
-            big.Scope.SetExtra("detail" + i, new string('y', 20_000));
+            level = Map(level)["next"];
         }
-        Assert.NotNull(big.CaptureMessage("large"));
-        await big.FlushAsync(Wait);
-        var rec = LogRecords(large.Requests("/v1/logs")).Single();
-        Assert.False(Kv(rec["attributes"]).ContainsKey("detail0"));
-        Assert.Equal("large", AnyValue(Map(rec["body"])));
+        Assert.Equal("[Object]", Map(level)["next"]);
+        var items = a["deepList"];
+        for (var i = 1; i < 10; i++)
+        {
+            items = List(items)[0];
+        }
+        Assert.Equal("[Array]", List(items)[0]);
+
+        static Dictionary<string, object?> Nest(int depth) =>
+            new() { ["next"] = depth == 1 ? "end" : Nest(depth - 1) };
+        static List<object?> NestList(int depth) =>
+            new() { depth == 1 ? "end" : NestList(depth - 1) };
 
         static IEnumerable<int> Forever()
         {
@@ -637,7 +762,11 @@ public class FixwireTests
             hub.Client!.Sessions!.Record("exited", Sessions.DeviceId(new User("user-" + i)), at);
         }
         await hub.FlushAsync(Wait);
-        var aggregates = List(ingest.Requests("/v1/sessions").Single().Body["aggregates"]).Select(Map).ToList();
+        // 5,000 users apart and one count without them: two requests of at most 5,000 aggregates.
+        var requests = ingest.Requests("/v1/sessions");
+        Assert.Equal(2, requests.Count);
+        Assert.All(requests, r => Assert.True(List(r.Body["aggregates"]).Count <= Sessions.MaxBuckets));
+        var aggregates = requests.SelectMany(r => List(r.Body["aggregates"])).Select(Map).ToList();
         Assert.Equal(Sessions.MaxBuckets + 1, aggregates.Count);
         Assert.Equal(Sessions.MaxBuckets + 500L, aggregates.Sum(x => (long)x["exited"]!));
         Assert.Equal(500L, aggregates.Single(x => !x.ContainsKey("did"))["exited"]);

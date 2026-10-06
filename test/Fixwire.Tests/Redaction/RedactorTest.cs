@@ -44,16 +44,29 @@ public sealed class RedactorTest
             "Account\u212Aey=[REDACTED:azure_storage_key]",
             Mask("Account\u212Aey=" + new string('a', 86) + "=="));
 
-        // The long s is no word character, so a boundary needs a word character before it.
-        Assert.Equal("  \u017Fecret=abcdefgh token", Mask("  \u017Fecret=abcdefgh token"));
+        // A name needs no word boundary before it, so the long s starts one anywhere.
+        Assert.Equal("  \u017Fecret=[REDACTED:secret_assignment] token", Mask("  \u017Fecret=abcdefgh token"));
 
-        // The prefilter lowers U+0130 to "i", so "ap\u0130key" lets the pattern run,
-        // but the pattern itself does not take U+0130 for "i".
+        // The pattern does not take U+0130 for "i".
         Assert.Equal("ap\u0130key access_key=[REDACTED:secret_assignment]", Mask("ap\u0130key access_key=abcdefgh"));
         Assert.Equal("ap\u0130_key=abcdefgh token", Mask("ap\u0130_key=abcdefgh token"));
+    }
 
-        // No prefilter literal in "access_key", so alone it is not looked at.
-        Assert.Equal("access_key=abcdefgh", Mask("access_key=abcdefgh"));
+    [Fact]
+    public void NamesMayEndLongerOnes()
+    {
+        Assert.Equal("access_key=[REDACTED:secret_assignment]", Mask("access_key=abcdefgh"));
+        Assert.Equal("client_secret=[REDACTED:secret_assignment]", Mask("client_secret=abcdefgh"));
+        Assert.Equal("csrfToken: [REDACTED:secret_assignment]", Mask("csrfToken: abcdefgh"));
+        Assert.Equal("PHPSESSID=[REDACTED:secret_assignment]", Mask("PHPSESSID=abcdef123"));
+        Assert.Equal("X-Amz-Signature=[REDACTED:secret_assignment]", Mask("X-Amz-Signature=0123456789abcdef"));
+
+        // An OAuth code only in a query or fragment; counts, exit codes and longer words stay.
+        Assert.Equal("https://x.example/cb?code=[REDACTED:secret_assignment]&state=1", Mask("https://x.example/cb?code=abcdefgh&state=1"));
+        foreach (string s in new[] { "code=abcdefgh", "exit code=123456", "secretary=abcdefgh", "tokenizer=abcdefgh", "token_count=123456" })
+        {
+            Assert.Equal(s, Mask(s));
+        }
     }
 
     [Fact]
@@ -338,6 +351,12 @@ public sealed class RedactorTest
         ["bearer words"] = Repeat("bearer ", 15_000),
         ["jwt headers"] = Repeat("eyJ-", 50_000),
         ["jwt payloads"] = "eyJabcdefgh." + Repeat("eyJ-", 50_000),
+        ["a name before spaces"] = "token" + new string(' ', 100_000),
+        ["a name before spaces and no value"] = "password\"" + new string(' ', 100_000) + "= ",
+        ["names before spaces"] = Repeat("secret_key  ", 20_000),
+        ["session ids"] = Repeat("sessid", 20_000),
+        ["code queries"] = Repeat("?code", 20_000),
+        ["signatures without values"] = Repeat("signature: ,", 20_000),
     };
 
     public static TheoryData<string> HostileNames => new(Hostile.Keys);
@@ -369,6 +388,43 @@ public sealed class RedactorTest
         Assert.Equal(50_000, m.Findings.Count);
         Assert.Equal(Repeat("[REDACTED:email] [REDACTED:credit_card] ", 25_000), m.Text);
         Assert.True(sw.ElapsedMilliseconds < 1000, "took " + sw.ElapsedMilliseconds + " ms");
+    }
+
+    [Fact]
+    public void ManyKeysMaskingAlikeAreFast()
+    {
+        // Each masked key's numbering resumes where it stopped, not counted up from 2 again.
+        var doc = new Dictionary<string, object?>();
+        for (int i = 0; i < 20_000; i++)
+        {
+            doc["user" + i + "@example.com"] = i;
+        }
+
+        int count = 0;
+        var sw = Stopwatch.StartNew();
+        R.Walk(doc, ref count);
+        sw.Stop();
+        Assert.Equal(20_000, count);
+        Assert.Equal(20_000, doc.Count);
+        Assert.True(doc.ContainsKey("[REDACTED:email]") && doc.ContainsKey("[REDACTED:email] (20000)"));
+        Assert.True(sw.ElapsedMilliseconds < 1000, "took " + sw.ElapsedMilliseconds + " ms");
+    }
+
+    [Fact]
+    public void WhatRedactionFailsOnIsFiltered()
+    {
+        // A detector whose pattern times out (no real one does): the text goes as [Filtered], never unmasked.
+        var r = new Redactor(new[] { "email" }, null);
+        var slow = Detector.Pattern("slow", false, Array.Empty<string>(), "(x+x+)+y");
+        typeof(Redactor).GetField("detectors", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(r, new[] { slow });
+        string hostile = new string('x', 40) + " ada@example.com";
+        Assert.Equal(Redactor.Filtered, r.Mask(hostile).Text);
+        var doc = new Dictionary<string, object?> { ["note"] = hostile, ["ok"] = "fine" };
+        int count = 0;
+        r.Walk(doc, ref count);
+        Assert.Equal(Redactor.Filtered, doc["note"]);
+        Assert.Equal(1, count);
     }
 
     [Fact]

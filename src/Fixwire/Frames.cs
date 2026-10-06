@@ -7,10 +7,8 @@ namespace Fixwire;
 /// <summary>Exceptions and their stacks, as events carry them.</summary>
 internal static class Frames
 {
-    /// <summary>The inner exceptions followed, and the frames kept per exception (the newest).</summary>
+    /// <summary>The exceptions of a chain: the one caught and its inner exceptions.</summary>
     public const int MaxChain = 10;
-
-    public const int MaxFrames = 100;
 
     /// <summary>Namespaces of .NET, ASP.NET Core and well-known libraries: not the app's.</summary>
     private static readonly string[] Libraries =
@@ -65,7 +63,7 @@ internal static class Frames
 #pragma warning restore CA1031
     }
 
-    /// <summary>A stack trace (the newest call first) as frames, the oldest first.</summary>
+    /// <summary>A stack trace (the newest call first) as frames, the oldest first: the newest <see cref="FixwireOptions.MaxStackFrames"/>.</summary>
 #if NET8_0_OR_GREATER
     [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
         "Trimming",
@@ -75,10 +73,11 @@ internal static class Frames
     private static List<Frame> Of(StackTrace trace, FixwireOptions options, bool skipSdk = false)
     {
         var stack = trace.GetFrames() ?? [];
-        var frames = new List<Frame>(Math.Min(stack.Length, MaxFrames));
+        var max = options.MaxStackFrames > 0 ? options.MaxStackFrames : 100; // options not yet given to a client
+        var frames = new List<Frame>(Math.Min(stack.Length, max));
         foreach (var f in stack)
         {
-            if (frames.Count == MaxFrames)
+            if (frames.Count == max)
             {
                 break; // the newest calls are kept
             }

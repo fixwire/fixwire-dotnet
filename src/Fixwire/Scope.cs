@@ -83,6 +83,10 @@ public sealed class Scope
     /// <param name="value">Its value.</param>
     public void SetTag(string key, string? value)
     {
+        if (key == null)
+        {
+            return; // nothing to set it under
+        }
         lock (_lock)
         {
             if (value == null)
@@ -101,6 +105,10 @@ public sealed class Scope
     /// <param name="values">Its details.</param>
     public void SetContext(string name, IDictionary<string, object?>? values)
     {
+        if (name == null)
+        {
+            return; // nothing to set it under
+        }
         lock (_lock)
         {
             if (values == null)
@@ -119,6 +127,10 @@ public sealed class Scope
     /// <param name="value">Its value.</param>
     public void SetExtra(string key, object? value)
     {
+        if (key == null)
+        {
+            return; // nothing to set it under
+        }
         lock (_lock)
         {
             if (value == null)
@@ -224,9 +236,12 @@ public sealed class Scope
     /// <summary>Records something that happened; past <paramref name="max"/>, the oldest go.</summary>
     /// <param name="breadcrumb">The breadcrumb.</param>
     /// <param name="max">The breadcrumbs kept.</param>
-    public void AddBreadcrumb(Breadcrumb breadcrumb, int max = 100)
+    public void AddBreadcrumb(Breadcrumb breadcrumb, int max = 100) =>
+        AddBreadcrumb(breadcrumb, max, FixwireOptions.DefaultMaxValueLength);
+
+    internal void AddBreadcrumb(Breadcrumb? breadcrumb, int max, int maxValueLength)
     {
-        if (max <= 0)
+        if (max <= 0 || breadcrumb == null)
         {
             return;
         }
@@ -234,9 +249,9 @@ public sealed class Scope
         {
             breadcrumb.Timestamp = DateTimeOffset.UtcNow;
         }
-        if (breadcrumb.Message is { Length: > Otlp.MaxRead } message)
+        if (breadcrumb.Message is { } message)
         {
-            breadcrumb.Message = Otlp.Clip(message, Otlp.MaxRead); // kept for a while: no more than an event reads of it
+            breadcrumb.Message = Otlp.Clip(message, maxValueLength + Otlp.ReadAhead); // kept for a while: no more than an event reads of it
         }
         lock (_lock)
         {

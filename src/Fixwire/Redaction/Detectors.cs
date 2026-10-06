@@ -117,14 +117,24 @@ internal static class Detectors
                 + @"((?>[A-Za-z0-9._~+/\-" + Folded + "]{12,})=*)",
             group: 1,
             validate: CredentialLike),
+        // A value given to a secret's name, in text, config and URLs. The name may end a longer one
+        // (access_token, client_secret, csrfToken, PHPSESSID, X-Amz-Signature); an OAuth code counts
+        // in a query or fragment only. The name is atomic: what follows it (a quote, a space, ":" or
+        // "=") can't be a letter it gave back, so each place is tried once and the scan is linear.
         Detector.Pattern(
             "secret_assignment",
             AnyCase,
-            Literals("pass", "secret", "token", "api_key", "apikey", "api-key", "pwd"),
-            Edge + "(?:" + IgnoringCase("password") + "|" + IgnoringCase("passwd") + "|" + IgnoringCase("pwd")
-                + "|" + IgnoringCase("secret") + "|" + IgnoringCase("token")
+            Literals("pass", "pwd", "secret", "key", "token", "credential", "sess", "sig", "code"),
+            "(?>" + IgnoringCase("password") + "|" + IgnoringCase("passwd") + "|" + IgnoringCase("pwd")
+                + "|" + IgnoringCase("secret") + "(?:[_-]?" + IgnoringCase("key") + ")?"
+                + "|" + IgnoringCase("private") + "[_-]?" + IgnoringCase("key")
+                + "|" + IgnoringCase("token")
                 + "|" + IgnoringCase("api") + "[_-]?" + IgnoringCase("key")
-                + "|" + IgnoringCase("access") + "[_-]?" + IgnoringCase("key") + ")"
+                + "|" + IgnoringCase("access") + "[_-]?" + IgnoringCase("key")
+                + "|" + IgnoringCase("credentials") + "?"
+                + "|" + IgnoringCase("sess") + "(?:" + IgnoringCase("ion") + ")?[_-]?" + IgnoringCase("id")
+                + "|" + IgnoringCase("sig") + "(?:" + IgnoringCase("nature") + ")?"
+                + "|[?&#]" + IgnoringCase("code") + ")"
                 + "(?>[\"']?)(?>" + Ws + "*)[:=](?>" + Ws + "*)(?>[\"']?)"
                 + "([^\\t\\n\\f\\r \"',;&]{6,})",
             group: 1,

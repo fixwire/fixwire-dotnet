@@ -144,9 +144,11 @@ public sealed class Hub
     {
         var c = _client;
         var max = 100;
+        var maxValueLength = FixwireOptions.DefaultMaxValueLength;
         if (c != null)
         {
             max = c.Options.MaxBreadcrumbs;
+            maxValueLength = c.Options.MaxValueLength;
             if (c.Options.BeforeBreadcrumb is { } before)
             {
                 try
@@ -154,8 +156,9 @@ public sealed class Hub
                     breadcrumb = before(breadcrumb)!;
                 }
 #pragma warning disable CA1031 // a failing callback keeps the breadcrumb as it was
-                catch (Exception)
+                catch (Exception ex)
                 {
+                    c.Transport?.Log("BeforeBreadcrumb failed, keeping the breadcrumb as it is: " + ex.Message);
                 }
 #pragma warning restore CA1031
                 if (breadcrumb == null)
@@ -164,7 +167,7 @@ public sealed class Hub
                 }
             }
         }
-        Scope.AddBreadcrumb(breadcrumb, max);
+        Scope.AddBreadcrumb(breadcrumb, max, maxValueLength);
     }
 
     /// <summary>Sends what someone said about an error or an AI answer.</summary>

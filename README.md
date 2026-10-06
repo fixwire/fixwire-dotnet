@@ -131,7 +131,12 @@ decision holds. Outgoing requests become client spans and breadcrumbs:
 var http = new HttpClient(new FixwireHttpMessageHandler(new HttpClientHandler()));
 ```
 
-Trace headers go only to `TracePropagationTargets`.
+Trace headers go only to `TracePropagationTargets`, compared with a URL
+without its user info, query and fragment: a target with `://` is a URL
+prefix (`https://api.example.com/v2`), one starting with `/` a path of
+relative URLs, and any other a host, with a port if it has one, matching that
+host and its subdomains (`example.com` matches `api.example.com`, not
+`badexample.com` or `example.com.evil.net`).
 
 ## Cron jobs and feedback
 
@@ -154,12 +159,15 @@ A negative score opens a `user_feedback` issue for the agent run.
 | `ServiceName` | `OTEL_SERVICE_NAME`, else `api` of `api@1.4.0` | |
 | `SampleRate` | 1 | Share of errors sent |
 | `TracesSampleRate` | 0 | Share of new traces kept |
-| `TracePropagationTargets` | none | URLs that receive trace headers |
+| `TracePropagationTargets` | none | Hosts, URL prefixes and paths that receive trace headers |
 | `BeforeSend`, `BeforeBreadcrumb` | | Change or drop events and breadcrumbs |
 | `SendDefaultPii` | off | Send the user's IP address and identifying headers |
 | `Redact`, `SensitiveKeys` | on, the server's keys | On-device masking |
 | `ErrorBudget` | 10 per issue, then 1 a minute; 600 a minute | |
 | `InAppInclude`, `InAppExclude` | all but .NET's and known libraries' | Which frames are your code |
+| `MaxValueLength` | 1,024 | Bytes of UTF-8 a string keeps (cut on a character, `...` within); masked first |
+| `MaxStackFrames` | 100 | Frames sent per exception, the newest |
+| `MaxBreadcrumbs`, `MaxQueue` | 100, 100 | Breadcrumbs kept; requests waiting to be sent (and as many for a retry) |
 | `CaptureUnhandledExceptions` | on | Report exceptions nothing caught |
 | `ShutdownTimeout` | 2 s | How long the exit waits to send |
 

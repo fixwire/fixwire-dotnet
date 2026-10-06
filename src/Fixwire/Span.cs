@@ -39,7 +39,10 @@ public sealed class Span : IDisposable
     /// <summary>The spans a segment keeps until it is sent.</summary>
     internal const int MaxChildren = 1000;
 
-    /// <summary>The longest <c>tracestate</c> and <c>baggage</c> passed on (the W3C specs' limits).</summary>
+    /// <summary>The attributes a span keeps, <c>fixwire.op</c> among them (OpenTelemetry's default limit); past them, new keys are dropped.</summary>
+    internal const int MaxAttributes = 128;
+
+    /// <summary>The longest <c>tracestate</c> and <c>baggage</c> passed on, in bytes (the W3C specs' limits).</summary>
     internal const int MaxTracestate = 512;
 
     internal const int MaxBaggage = 8192;
@@ -63,7 +66,11 @@ public sealed class Span : IDisposable
         Name = b.Name;
         Op = b.Op;
         _client = b.Hub.Client;
-        _attributes = new Dictionary<string, object?>(b.Attributes);
+        _attributes = new Dictionary<string, object?>();
+        foreach (var a in b.Attributes)
+        {
+            Put(a.Key, a.Value);
+        }
         SpanId = Ids.New(8);
         Start = DateTimeOffset.UtcNow;
         var continued = b.Traceparent == null ? null : ParseTraceparent(b.Traceparent);
@@ -139,12 +146,20 @@ public sealed class Span : IDisposable
     /// <summary>The W3C <c>traceparent</c> header that continues this span's trace in a service it calls.</summary>
     public string Traceparent => "00-" + TraceId + "-" + SpanId + (Sampled ? "-01" : "-00");
 
-    /// <summary>Sets an attribute (OpenTelemetry's semantic conventions).</summary>
+    /// <summary>Sets an attribute (OpenTelemetry's semantic conventions). A span keeps 128; past them, new keys are dropped.</summary>
     /// <param name="key">The attribute.</param>
     /// <param name="value">Its value.</param>
     public void SetAttribute(string key, object? value)
     {
         lock (_lock)
+        {
+            Put(key, value);
+        }
+    }
+
+    private void Put(string key, object? value)
+    {
+        if (key != null && (_attributes.ContainsKey(key) || _attributes.Count < MaxAttributes - (Op == null ? 0 : 1)))
         {
             _attributes[key] = value;
         }
@@ -160,7 +175,7 @@ public sealed class Span : IDisposable
             if (exception != null)
             {
                 _statusMessage = Frames.MessageOf(exception);
-                _attributes["error.type"] = exception.GetType().FullName;
+                Put("error.type", exception.GetType().FullName);
             }
         }
     }
@@ -273,33 +288,39 @@ public sealed class Span : IDisposable
         return n / (double)(1L << 56) >= 1 - rate;
     }
 
-    /// <summary>Reads <c>00-&lt;trace id&gt;-&lt;parent id&gt;-&lt;flags&gt;</c>; null when malformed.</summary>
+    /// <summary>
+    /// Reads <c>00-&lt;trace id&gt;-&lt;parent id&gt;-&lt;flags&gt;</c>, strictly: version 00, a
+    /// non-zero trace id of 32 lower-case hex digits, a non-zero span id of 16, flags of 2. Null
+    /// when malformed.
+    /// </summary>
     internal static (string TraceId, string ParentId, bool Sampled)? ParseTraceparent(string header)
     {
         var p = header.Trim().Split('-');
-        if (p.Length < 4 || p[0].Length != 2 || p[0].Equals("ff", StringComparison.OrdinalIgnoreCase)
-            || p[1].Length != 32 || p[2].Length != 16 || p[3].Length != 2)
+        if (p.Length != 4 || p[0] != "00" || p[1].Length != 32 || p[2].Length != 16 || p[3].Length != 2)
         {
             return null;
         }
-        if (!IsHex(p[0]) || !IsHex(p[1]) || !IsHex(p[2]) || !IsHex(p[3]) || p[1].Trim('0').Length == 0 || p[2].Trim('0').Length == 0)
+        if (!IsHex(p[1]) || !IsHex(p[2]) || !IsHex(p[3]) || p[1].Trim('0').Length == 0 || p[2].Trim('0').Length == 0)
         {
             return null;
         }
         var flags = int.Parse(p[3], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture);
-        return (p[1].ToLowerInvariant(), p[2].ToLowerInvariant(), (flags & 1) == 1);
+        return (p[1], p[2], (flags & 1) == 1);
     }
 
-    /// <summary>A caller's header to pass on to the services this one calls: null when too long or not one line of text.</summary>
+    /// <summary>
+    /// A caller's header to pass on to the services this one calls: null (dropped whole, never cut)
+    /// when over max bytes of UTF-8 or holding a control character (a tab aside: headers allow it).
+    /// </summary>
     private static string? Passable(string? value, int max)
     {
-        if (value == null || value.Length > max)
+        if (value == null || value.Length > max || System.Text.Encoding.UTF8.GetByteCount(value) > max)
         {
             return null;
         }
         foreach (var c in value)
         {
-            if ((c < ' ' && c != '\t') || c == '\u007f')
+            if (char.IsControl(c) && c != '\t')
             {
                 return null;
             }
@@ -311,7 +332,7 @@ public sealed class Span : IDisposable
     {
         foreach (var c in s)
         {
-            if (!(c is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F'))
+            if (!(c is >= '0' and <= '9' or >= 'a' and <= 'f'))
             {
                 return false;
             }
@@ -405,7 +426,10 @@ public sealed class SpanBuilder
     /// <param name="value">Its value.</param>
     public SpanBuilder WithAttribute(string key, object? value)
     {
-        Attributes[key] = value;
+        if (key != null && (Attributes.ContainsKey(key) || Attributes.Count < Span.MaxAttributes))
+        {
+            Attributes[key] = value; // the span keeps what fits
+        }
         return this;
     }
 

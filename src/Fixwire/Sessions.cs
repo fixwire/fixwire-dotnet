@@ -43,7 +43,7 @@ internal sealed class RequestSession
 /// </summary>
 internal sealed class Sessions : IDisposable
 {
-    /// <summary>The (minute, user) counts kept between sends; past it, requests count without their user.</summary>
+    /// <summary>The (minute, user) counts kept between sends, past which requests count without their user; and the aggregates a request holds.</summary>
     internal const int MaxBuckets = 5000;
 
     private readonly Client _client;
@@ -109,13 +109,17 @@ internal sealed class Sessions : IDisposable
             a["crashed"] = kv.Value[2];
             aggregates.Add(a);
         }
-        _client.SendJson("/v1/sessions", Transport.Session, new Dictionary<string, object?>
+        // Users apart, and a count without them for each minute: a request holds MaxBuckets at most.
+        for (var i = 0; i < aggregates.Count; i += MaxBuckets)
         {
-            ["sdk"] = Client.Sdk(),
-            ["release"] = _client.Options.Release,
-            ["environment"] = _client.Options.Environment,
-            ["aggregates"] = aggregates,
-        });
+            _client.SendJson("/v1/sessions", Transport.Session, new Dictionary<string, object?>
+            {
+                ["sdk"] = Client.Sdk(),
+                ["release"] = _client.Options.Release,
+                ["environment"] = _client.Options.Environment,
+                ["aggregates"] = aggregates.GetRange(i, Math.Min(MaxBuckets, aggregates.Count - i)),
+            });
+        }
     }
 
     /// <summary>Sends, from the timer.</summary>

@@ -92,11 +92,17 @@ internal sealed class Redactor
 
     /// <summary>
     /// Masks the findings in s: each becomes <c>[REDACTED:&lt;detector&gt;]</c>, as the server
-    /// writes it. Null gives null text and no findings.
+    /// writes it. Null gives null text and no findings; text redaction fails on (a pattern timed
+    /// out) is <c>[Filtered]</c>, never unmasked.
     /// </summary>
     public MaskResult Mask(string? s)
     {
-        IReadOnlyList<Finding> fs = s == null ? Array.Empty<Finding>() : Find(s);
+        IReadOnlyList<Finding>? fs = s == null ? Array.Empty<Finding>() : TryFind(s);
+        if (fs == null)
+        {
+            return new MaskResult(Filtered, Array.Empty<string>());
+        }
+
         if (fs.Count == 0)
         {
             return new MaskResult(s, Array.Empty<string>());
@@ -176,6 +182,21 @@ internal sealed class Redactor
         }
 
         return output ?? (IReadOnlyList<Finding>)Array.Empty<Finding>();
+    }
+
+    /// <summary>The findings in s, or null when redaction failed on it (a pattern timed out).</summary>
+    private IReadOnlyList<Finding>? TryFind(string s)
+    {
+        try
+        {
+            return Find(s);
+        }
+#pragma warning disable CA1031 // what redaction fails on is sent as [Filtered], never unmasked
+        catch (Exception)
+        {
+            return null;
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>Where a finding starting at start goes in fs, which is by start.</summary>
@@ -352,10 +373,16 @@ internal sealed class Redactor
         return t != null && t.IsPrimitive && t != typeof(IntPtr) && t != typeof(UIntPtr);
     }
 
-    /// <summary>The masked text when it holds findings, else unchanged.</summary>
+    /// <summary>The masked text when it holds findings, else unchanged; [Filtered] when redaction failed on it.</summary>
     private object MaskText(string text, object unchanged, ref int n)
     {
-        IReadOnlyList<Finding> fs = Find(text);
+        IReadOnlyList<Finding>? fs = TryFind(text);
+        if (fs == null)
+        {
+            n++;
+            return Filtered;
+        }
+
         if (fs.Count == 0)
         {
             return unchanged;
@@ -378,11 +405,11 @@ internal sealed class Redactor
                 continue;
             }
 
-            IReadOnlyList<Finding> fs = Find(key);
-            if (fs.Count > 0)
+            IReadOnlyList<Finding>? fs = TryFind(key);
+            if (fs == null || fs.Count > 0)
             {
                 renamed ??= new List<Rename>();
-                renamed.Add(new Rename(key, Replace(key, fs), fs.Count));
+                renamed.Add(fs == null ? new Rename(key, Filtered, 1) : new Rename(key, Replace(key, fs), fs.Count));
             }
 
             if (Sensitive(key) && !Empty(val))
@@ -422,8 +449,10 @@ internal sealed class Redactor
         if (renamed != null)
         {
             // Keys hold data too ({"ada@example.com": 3}). Keys that mask alike
-            // are numbered in key order: "[REDACTED:email] (2)".
+            // are numbered in key order: "[REDACTED:email] (2)". Each masked key's numbering
+            // resumes where it stopped, so thousands of keys alike stay linear.
             renamed.Sort();
+            var next = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (Rename r in renamed)
             {
                 if (!map.TryGetValue(r.Key, out object? val))
@@ -432,11 +461,13 @@ internal sealed class Redactor
                 }
 
                 string key = r.Masked;
-                for (int i = 2; map.ContainsKey(key); i++)
+                next.TryGetValue(r.Masked, out int i);
+                for (i = Math.Max(i, 2); map.ContainsKey(key); i++)
                 {
                     key = r.Masked + " (" + i.ToString(CultureInfo.InvariantCulture) + ")";
                 }
 
+                next[r.Masked] = i;
                 map.Remove(r.Key);
                 map[key] = val;
                 n += r.Count;

@@ -80,6 +80,8 @@ internal static class FixwireConfiguration
         o.AutoSessionTracking = Bool(c["AutoSessionTracking"]) ?? o.AutoSessionTracking;
         o.CaptureUnhandledExceptions = Bool(c["CaptureUnhandledExceptions"]) ?? o.CaptureUnhandledExceptions;
         o.MaxBreadcrumbs = Int(c["MaxBreadcrumbs"]) ?? o.MaxBreadcrumbs;
+        o.MaxValueLength = Int(c["MaxValueLength"]) ?? o.MaxValueLength;
+        o.MaxStackFrames = Int(c["MaxStackFrames"]) ?? o.MaxStackFrames;
         foreach (var t in List(c.GetSection("TracePropagationTargets")))
         {
             o.TracePropagationTargets.Add(t);

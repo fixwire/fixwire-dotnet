@@ -24,12 +24,21 @@ public static class FixwireHostingExtensions
     /// </summary>
     /// <param name="builder">The host's builder.</param>
     /// <param name="configure">Changes the options read from configuration.</param>
-    public static IHostApplicationBuilder AddFixwire(this IHostApplicationBuilder builder, Action<FixwireOptions>? configure = null)
+    public static IHostApplicationBuilder AddFixwire(this IHostApplicationBuilder builder, Action<FixwireOptions>? configure = null) =>
+        AddFixwireForIntegration(builder, configure, reportedElsewhere: []);
+
+    /// <summary>
+    /// <see cref="AddFixwire(IHostApplicationBuilder, Action{FixwireOptions}?)"/>, for an integration that reports
+    /// the exceptions some loggers log itself: their records don't become events (ASP.NET Core's exception
+    /// handler logs the exception before the integration's handler sees it).
+    /// </summary>
+    internal static IHostApplicationBuilder AddFixwireForIntegration(IHostApplicationBuilder builder, Action<FixwireOptions>? configure, string[] reportedElsewhere)
     {
         var section = builder.Configuration.GetSection("Fixwire");
         var options = FixwireConfiguration.Read(section);
         configure?.Invoke(options);
         var logging = FixwireConfiguration.ReadLogging(section.GetSection("Logging"));
+        logging.ReportedElsewhere.UnionWith(reportedElsewhere);
         var handle = FixwireSdk.Init(options);
         builder.Services.AddSingleton<IHostedService>(new FixwireLifetime(handle));
         builder.Services.AddSingleton<ILoggerProvider>(new FixwireLoggerProvider(logging));

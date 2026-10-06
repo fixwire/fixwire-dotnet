@@ -25,7 +25,15 @@ public static class FixwireWebApplicationBuilderExtensions
     /// <param name="configure">Changes the options read from configuration.</param>
     public static WebApplicationBuilder AddFixwire(this WebApplicationBuilder builder, Action<FixwireOptions>? configure = null)
     {
-        ((IHostApplicationBuilder)builder).AddFixwire(configure);
+        // What these middlewares log, the handlers below report as crashes.
+        FixwireHostingExtensions.AddFixwireForIntegration(
+            builder,
+            configure,
+            reportedElsewhere:
+            [
+                "Microsoft.AspNetCore.Diagnostics.ExceptionHandlerMiddleware",
+                "Microsoft.AspNetCore.Diagnostics.DeveloperExceptionPageMiddleware",
+            ]);
         builder.Services.AddTransient<IStartupFilter, FixwireStartupFilter>();
         builder.Services.AddSingleton<IExceptionHandler, FixwireExceptionHandler>();
         builder.Services.AddSingleton<IDeveloperPageExceptionFilter, FixwireDeveloperPageExceptionFilter>();

@@ -52,6 +52,10 @@ public sealed class FixwireLoggerProvider : ILoggerProvider
                 {
                     return; // sent already, where it was caught
                 }
+                if (exception != null && options.ReportedElsewhere.Contains(category))
+                {
+                    return; // an integration reports it, as what it is
+                }
                 var e = exception == null
                     ? new FixwireEvent { Message = message, Level = level }
                     : new FixwireEvent
@@ -96,4 +100,7 @@ public sealed class FixwireLoggingOptions
 
     /// <summary>Records at or above it are sent as events (default Error).</summary>
     public LogLevel EventLevel { get; set; } = LogLevel.Error;
+
+    /// <summary>Loggers whose exceptions an integration reports itself.</summary>
+    internal HashSet<string> ReportedElsewhere { get; } = new(StringComparer.Ordinal);
 }

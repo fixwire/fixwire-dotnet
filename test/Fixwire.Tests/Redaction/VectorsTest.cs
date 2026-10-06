@@ -6,8 +6,9 @@ using Fixwire.Redaction;
 namespace Fixwire.Tests.Redaction;
 
 /// <summary>
-/// The shared corpus of the Fixwire server's redaction (pkg/redact/testdata/vectors.json): this
-/// port must mask every string and document exactly as the server does.
+/// The shared corpus of the Fixwire server's redaction (a copy of pkg/redact/testdata/vectors.json
+/// in fixwire/fixwire, kept identical): this port must mask every string and document exactly as
+/// the server does.
 /// </summary>
 public sealed class VectorsTest
 {
@@ -49,28 +50,10 @@ public sealed class VectorsTest
         Assert.Equal(tc.GetProperty("count").GetInt32(), count);
     }
 
-    /// <summary>The corpus, in the repository's pkg/ above this test, or where FIXWIRE_VECTORS points.</summary>
+    /// <summary>The corpus, copied next to the test assembly.</summary>
     private static JsonElement Load()
     {
-        string? file = null;
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-        {
-            string candidate = Path.Combine(dir.FullName, "pkg", "redact", "testdata", "vectors.json");
-            if (File.Exists(candidate))
-            {
-                file = candidate;
-                break;
-            }
-        }
-
-        file ??= Environment.GetEnvironmentVariable("FIXWIRE_VECTORS");
-        if (string.IsNullOrEmpty(file))
-        {
-            throw new InvalidOperationException(
-                "pkg/redact/testdata/vectors.json not found above " + AppContext.BaseDirectory + "; set FIXWIRE_VECTORS");
-        }
-
-        using var doc = JsonDocument.Parse(File.ReadAllText(file));
+        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Redaction", "vectors.json")));
         return doc.RootElement.Clone();
     }
 

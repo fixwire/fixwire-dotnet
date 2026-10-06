@@ -10,6 +10,8 @@
     <Using Include="Xunit" />
     <!-- Some tests set the SDK up globally (FixwireSdk.Init): run them one at a time. -->
     <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- A copy of the server's redaction corpus, kept identical to it. -->
+    <Content Include="Redaction/vectors.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Fixwire/Fixwire.csproj" />

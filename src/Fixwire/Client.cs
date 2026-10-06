@@ -14,7 +14,7 @@ public sealed class Client : IDisposable
     /// <summary>The SDK's name and version, as <c>telemetry.sdk.*</c> say it.</summary>
     internal const string SdkName = "fixwire.dotnet";
 
-    internal const string SdkVersion = "0.1.1";
+    internal const string SdkVersion = "0.1.2";
 
     /// <summary>The largest error or message the ingest takes, and the largest request of spans (fixwire-protocol §3, §4).</summary>
     internal const int MaxEventBytes = 1 << 20;

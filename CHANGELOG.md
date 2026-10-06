@@ -4,7 +4,7 @@ All notable changes to the Fixwire .NET SDK are listed here. Versions follow [Se
 Versioning](https://semver.org); before 1.0, a minor version may change the
 API.
 
-## [Unreleased]
+## [0.1.2] - 2026-10-07
 
 - The error budget forgets the least recently seen of its 1,024 issues in constant time, reusing its memory: a new issue no longer scans them all.
 

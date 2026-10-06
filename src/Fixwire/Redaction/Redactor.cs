@@ -140,6 +140,9 @@ internal sealed class Redactor
             return Array.Empty<Finding>();
         }
 
+        // Findings are kept by start and never overlap, so a span is checked against its two
+        // neighbours only, and each detector's findings are merged in at once: thousands of
+        // findings in one text stay fast.
         var t = new Text(s);
         List<Finding>? output = null;
         foreach (Detector d in detectors)
@@ -149,6 +152,7 @@ internal sealed class Redactor
                 continue;
             }
 
+            List<Finding>? found = null;
             foreach (TextSpan span in d.Spans(t))
             {
                 if (d.Validate != null && !d.Validate(s.Substring(span.Start, span.End - span.Start)))
@@ -156,39 +160,71 @@ internal sealed class Redactor
                     continue;
                 }
 
-                if (output == null)
-                {
-                    output = new List<Finding>();
-                }
-                else if (Overlaps(output, span))
+                if (Overlaps(output, span) || Overlaps(found, span))
                 {
                     continue;
                 }
 
-                output.Add(new Finding(d.Name, span.Start, span.End));
+                found ??= new List<Finding>();
+                found.Insert(InsertionPoint(found, span.Start), new Finding(d.Name, span.Start, span.End)); // at the end: spans come leftmost first
+            }
+
+            if (found != null)
+            {
+                output = output == null ? found : Merge(output, found);
             }
         }
 
-        if (output == null)
-        {
-            return Array.Empty<Finding>();
-        }
-
-        output.Sort((a, b) => a.Start.CompareTo(b.Start));
-        return output;
+        return output ?? (IReadOnlyList<Finding>)Array.Empty<Finding>();
     }
 
-    private static bool Overlaps(List<Finding> fs, TextSpan span)
+    /// <summary>Where a finding starting at start goes in fs, which is by start.</summary>
+    private static int InsertionPoint(List<Finding> fs, int start)
     {
-        foreach (Finding f in fs)
+        int lo = 0;
+        int hi = fs.Count;
+        while (lo < hi)
         {
-            if (span.Start < f.End && f.Start < span.End)
+            int mid = lo + ((hi - lo) / 2);
+            if (fs[mid].Start < start)
             {
-                return true;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
             }
         }
 
-        return false;
+        return lo;
+    }
+
+    /// <summary>Whether span overlaps one of fs (by start, not overlapping): only the neighbours of its place can.</summary>
+    private static bool Overlaps(List<Finding>? fs, TextSpan span)
+    {
+        if (fs == null)
+        {
+            return false;
+        }
+
+        int at = InsertionPoint(fs, span.Start);
+        return (at > 0 && Overlaps(fs[at - 1], span)) || (at < fs.Count && Overlaps(fs[at], span));
+    }
+
+    private static bool Overlaps(Finding f, TextSpan span) => span.Start < f.End && f.Start < span.End;
+
+    /// <summary>Two lists of findings by start as one.</summary>
+    private static List<Finding> Merge(List<Finding> a, List<Finding> b)
+    {
+        var output = new List<Finding>(a.Count + b.Count);
+        int i = 0;
+        int j = 0;
+        while (i < a.Count || j < b.Count)
+        {
+            output.Add(j == b.Count || (i < a.Count && a[i].Start < b[j].Start) ? a[i++] : b[j++]);
+        }
+
+        return output;
     }
 
     /// <summary>s with each finding replaced by [REDACTED:detector].</summary>

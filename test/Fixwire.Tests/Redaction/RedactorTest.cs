@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 using Fixwire.Redaction;
 
 namespace Fixwire.Tests.Redaction;
@@ -335,6 +336,8 @@ public sealed class RedactorTest
         ["short secrets"] = Repeat("token=\U0001F600\U0001F600 ", 10_000),
         ["long slack runs"] = Repeat("xox" + "b-" + new string('a', 300) + " ", 300),
         ["bearer words"] = Repeat("bearer ", 15_000),
+        ["jwt headers"] = Repeat("eyJ-", 50_000),
+        ["jwt payloads"] = "eyJabcdefgh." + Repeat("eyJ-", 50_000),
     };
 
     public static TheoryData<string> HostileNames => new(Hostile.Keys);
@@ -352,6 +355,42 @@ public sealed class RedactorTest
             sw.Stop();
             Assert.Empty(m.Findings);
             Assert.True(sw.ElapsedMilliseconds < 500, name + " took " + sw.ElapsedMilliseconds + " ms");
+        }
+    }
+
+    [Fact]
+    public void ManyFindingsAreFast()
+    {
+        // Each finding is checked against its neighbours only, not against every one before it.
+        string input = Repeat("ada@example.com 4111111111111111 ", 25_000);
+        var sw = Stopwatch.StartNew();
+        MaskResult m = R.Mask(input);
+        sw.Stop();
+        Assert.Equal(50_000, m.Findings.Count);
+        Assert.Equal(Repeat("[REDACTED:email] [REDACTED:credit_card] ", 25_000), m.Text);
+        Assert.True(sw.ElapsedMilliseconds < 1000, "took " + sw.ElapsedMilliseconds + " ms");
+    }
+
+    [Fact]
+    public void JwtScannerFindsWhatThePatternFinds()
+    {
+        // The server's pattern, as a backtracking engine runs it (quadratic on "eyJ-eyJ-…").
+        var pattern = new Regex(@"(?<![0-9A-Za-z_])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}");
+        var jwt = new Redactor(new[] { "jwt" }, null);
+        string[] pieces = { "eyJ", "eyJ", "abcdefgh", "a1", "-", "_", ".", " ", "x", "é" };
+        var random = new Random(7);
+        for (int i = 0; i < 5000; i++)
+        {
+            var b = new StringBuilder();
+            for (int n = random.Next(1, 40); n > 0; n--)
+            {
+                b.Append(pieces[random.Next(pieces.Length)]);
+            }
+
+            string s = b.ToString();
+            var want = pattern.Matches(s).Select(x => (x.Index, x.Index + x.Length));
+            var got = jwt.Find(s).Select(f => (f.Start, f.End));
+            Assert.True(want.SequenceEqual(got), s);
         }
     }
 }

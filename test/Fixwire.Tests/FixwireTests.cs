@@ -1,3 +1,11 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
+using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
 using static Fixwire.Tests.FakeIngest;
 
 namespace Fixwire.Tests;
@@ -171,17 +179,22 @@ public class FixwireTests
     public async Task MasksSecretsAndPersonalDataOnTheDevice()
     {
         var ingest = new FakeIngest();
-        var hub = ingest.Hub();
+        var hub = ingest.Hub(o => o.TracesSampleRate = 1);
         hub.Scope.SetExtra("password", "hunter2hunter2");
         hub.Scope.SetExtra("note", "card 4111 1111 1111 1111 declined");
         hub.CaptureException(new InvalidOperationException("mail to ada@example.com bounced"));
         hub.CaptureFeedback(new Feedback("call me at ada@example.com"));
+        using (var span = hub.SpanBuilder("send mail").WithParent(null).Start())
+        {
+            span.SetError(new InvalidOperationException("mail to ada@example.com bounced"));
+        }
         await hub.FlushAsync(Wait);
         var a = Kv(LogRecords(ingest.Requests("/v1/logs"))[0]["attributes"]);
         Assert.Equal("[Filtered]", a["password"]);
         Assert.Equal("card [REDACTED:credit_card] declined", a["note"]);
         Assert.Equal("mail to [REDACTED:email] bounced", a["exception.message"]);
         Assert.Equal("call me at [REDACTED:email]", ingest.Requests("/v1/feedback")[0].Body["message"]);
+        Assert.Equal("mail to [REDACTED:email] bounced", Map(Spans(ingest.Requests("/v1/traces"))[0]["status"])["message"]);
 
         var raw = new FakeIngest();
         var off = raw.Hub(o => o.Redact = false);
@@ -264,6 +277,12 @@ public class FixwireTests
         using (var u = hub.SpanBuilder("GET /").ContinueTrace("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00").Start())
         {
             Assert.False(u.Sampled);
+        }
+        // What is passed on to the services this one calls is one line, within the W3C limits.
+        using (var v = hub.SpanBuilder("GET /").ContinueTrace("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00", "fw=1\r\nx-injected: 1", new string('b', Span.MaxBaggage + 1)).Start())
+        {
+            Assert.Null(v.Tracestate);
+            Assert.Null(v.Baggage);
         }
         foreach (var bad in new[]
         {
@@ -394,6 +413,237 @@ public class FixwireTests
     }
 
     [Fact]
+    public async Task WaitsNoLongerThanItShould()
+    {
+        // A 503 asking for a day is dropped, not parked in the queue all that time.
+        var ingest = new FakeIngest { Answer = (_, _) => (503, new Dictionary<string, string> { ["Retry-After"] = "86400" }) };
+        var hub = ingest.Hub();
+        hub.CaptureMessage("unavailable");
+        Assert.True(await hub.FlushAsync(Wait));
+        Assert.Single(ingest.Requests());
+
+        var now = DateTimeOffset.UtcNow;
+        Assert.Equal(TimeSpan.FromSeconds(30), Transport.RetryAfter(new RetryConditionHeaderValue(now.AddSeconds(30)), now));
+        Assert.Equal(TimeSpan.Zero, Transport.RetryAfter(new RetryConditionHeaderValue(now.AddSeconds(-30)), now));
+        Assert.Equal(TimeSpan.Zero, Transport.RetryAfter(null, now));
+
+        // Fixwire-Rate-Limits: past a day is a day, and categories the protocol doesn't name are let go.
+        var transport = hub.Client!.Transport!;
+        transport.Limit("99999999999999:error;" + string.Join(";", Enumerable.Range(0, 1000).Select(i => "c" + i)), now);
+        var paused = (System.Collections.IDictionary)typeof(Transport).GetField("_paused", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(transport)!;
+        Assert.Equal(new[] { "error" }, paused.Keys.Cast<string>());
+        Assert.Equal(now.AddDays(1), (DateTimeOffset)paused["error"]!);
+    }
+
+    [Fact]
+    public async Task FollowsNoRedirect()
+    {
+        // The DSN's host answers 307 to elsewhere: neither the key nor the event goes there.
+        using var elsewhere = new TcpListener(IPAddress.Loopback, 0);
+        elsewhere.Start();
+        var redirected = elsewhere.AcceptTcpClientAsync();
+        using var dsnHost = new TcpListener(IPAddress.Loopback, 0);
+        dsnHost.Start();
+        var to = "http://127.0.0.1:" + ((IPEndPoint)elsewhere.LocalEndpoint).Port + "/v1/logs";
+        var answered = AnswerOnceAsync(dsnHost, "HTTP/1.1 307 Temporary Redirect\r\nLocation: " + to + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        using (var client = new Client(new FixwireOptions
+        {
+            Dsn = "http://publickey@127.0.0.1:" + ((IPEndPoint)dsnHost.LocalEndpoint).Port,
+            CaptureUnhandledExceptions = false,
+        }))
+        {
+            new Hub(client).CaptureMessage("moved");
+            Assert.True(await client.FlushAsync(Wait));
+        }
+        await answered;
+        Assert.False(redirected.IsCompleted);
+    }
+
+    /// <summary>Reads one HTTP request (headers and body) and writes the answer.</summary>
+    private static async Task AnswerOnceAsync(TcpListener listener, string answer)
+    {
+        using var connection = await listener.AcceptTcpClientAsync();
+        var stream = connection.GetStream();
+        var request = new MemoryStream();
+        var buffer = new byte[16 * 1024];
+        var bodyAt = -1;
+        var length = 0;
+        while (bodyAt < 0 || request.Length < bodyAt + length)
+        {
+            var n = await stream.ReadAsync(buffer);
+            if (n == 0)
+            {
+                break;
+            }
+            request.Write(buffer, 0, n);
+            var head = Encoding.ASCII.GetString(request.GetBuffer(), 0, (int)request.Length);
+            var end = head.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            if (bodyAt < 0 && end >= 0)
+            {
+                bodyAt = end + 4;
+                var m = Regex.Match(head[..end], @"(?im)^content-length:\s*(\d+)");
+                length = m.Success ? int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
+            }
+        }
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(answer));
+    }
+
+    [Fact]
+    public async Task ReadsNoAnswerBody()
+    {
+        // Only the status and headers matter: a huge (here endless) body is never buffered.
+        var body = new EndlessStream();
+        var hub = new Hub(new Client(new FixwireOptions
+        {
+            Dsn = FakeIngest.Dsn,
+            HttpMessageHandler = new Answering(() => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(body) }),
+            CaptureUnhandledExceptions = false,
+        }));
+        Assert.NotNull(hub.CaptureMessage("answered"));
+        Assert.True(await hub.FlushAsync(Wait));
+        Assert.Equal(0, body.BytesRead);
+    }
+
+    private sealed class Answering(Func<HttpResponseMessage> answer) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(answer());
+    }
+
+    /// <summary>A body without end; past a megabyte it fails, as a client buffering it would.</summary>
+    private sealed class EndlessStream : Stream
+    {
+        public long BytesRead;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position { get => BytesRead; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (Interlocked.Add(ref BytesRead, count) > 1 << 20)
+            {
+                throw new IOException("the body was read");
+            }
+            Array.Fill(buffer, (byte)'x', offset, count);
+            return count;
+        }
+
+        public override void Flush() { }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class UnreadableException : Exception
+    {
+        public override string Message => throw new InvalidOperationException("no message");
+    }
+
+    private sealed class Unprintable
+    {
+        public override string ToString() => throw new InvalidOperationException("no string");
+    }
+
+    [Fact]
+    public async Task CapturingNeverThrowsAtTheApp()
+    {
+        var ingest = new FakeIngest();
+        var hub = ingest.Hub();
+        Assert.NotNull(hub.CaptureException(new UnreadableException()));
+
+        // Messages the error budget's fingerprint used to time out on (and throw at the app).
+        var sw = Stopwatch.StartNew();
+        Assert.NotNull(hub.CaptureMessage("q" + new string('@', 20_000)));
+        Assert.NotNull(hub.CaptureMessage(string.Concat(Enumerable.Repeat("eyJ-", 20_000))));
+        Assert.True(sw.ElapsedMilliseconds < 1000, "took " + sw.ElapsedMilliseconds + " ms");
+
+        // One exception captured on many threads at once.
+        var shared = new InvalidOperationException("shared");
+        Parallel.For(0, 64, _ => hub.CaptureException(shared));
+        Assert.True(hub.Client!.IsCaptured(shared));
+
+        await hub.FlushAsync(Wait);
+        var a = Kv(LogRecords(ingest.Requests("/v1/logs"))[0]["attributes"]);
+        Assert.Equal(typeof(UnreadableException).FullName, a["exception.type"]);
+        Assert.False(a.ContainsKey("exception.message"));
+    }
+
+    [Fact]
+    public async Task BoundsWhatItSends()
+    {
+        var ingest = new FakeIngest();
+        var hub = ingest.Hub();
+        var cycle = new Dictionary<string, object?>();
+        for (var i = 0; i < 8; i++)
+        {
+            cycle["k" + i] = cycle; // walked to the depth limit: 8^10 values
+        }
+        hub.Scope.SetExtra("cycle", cycle);
+        hub.Scope.SetExtra("endless", Forever());
+        hub.Scope.SetExtra("unprintable", new Unprintable());
+        hub.Scope.SetExtra("long", new string('x', 100_000));
+        var crumb = new Breadcrumb("upload", new string('z', 100_000));
+        hub.AddBreadcrumb(crumb);
+        Assert.Equal(Otlp.MaxRead, crumb.Message!.Length); // kept no larger than an event reads
+        Assert.NotNull(hub.CaptureMessage("bounded"));
+        await hub.FlushAsync(Wait);
+        var a = Kv(LogRecords(ingest.Requests("/v1/logs"))[0]["attributes"]);
+        Assert.Equal("[Circular ~]", Map(a["cycle"])["k0"]);
+        Assert.Equal(1000, List(a["endless"]).Count);
+        Assert.Equal("[Unreadable]", a["unprintable"]);
+        Assert.Equal(new string('x', Otlp.MaxString - 3) + "...", a["long"]);
+        Assert.Equal(Otlp.MaxString, ((string)Map(List(a["fixwire.breadcrumbs"])[0])["message"]!).Length);
+
+        // Past the ingest's 1 MB, an event goes without its extra details.
+        var large = new FakeIngest();
+        var big = large.Hub();
+        for (var i = 0; i < 100; i++)
+        {
+            big.Scope.SetExtra("detail" + i, new string('y', 20_000));
+        }
+        Assert.NotNull(big.CaptureMessage("large"));
+        await big.FlushAsync(Wait);
+        var rec = LogRecords(large.Requests("/v1/logs")).Single();
+        Assert.False(Kv(rec["attributes"]).ContainsKey("detail0"));
+        Assert.Equal("large", AnyValue(Map(rec["body"])));
+
+        static IEnumerable<int> Forever()
+        {
+            for (var i = 0; ; i++)
+            {
+                yield return i;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CountsSessionsOfManyUsersWithinBounds()
+    {
+        var ingest = new FakeIngest();
+        var hub = ingest.Hub(o => o.Release = "shop@1.2.0");
+        var at = DateTimeOffset.UtcNow;
+        for (var i = 0; i < Sessions.MaxBuckets + 500; i++)
+        {
+            hub.Client!.Sessions!.Record("exited", Sessions.DeviceId(new User("user-" + i)), at);
+        }
+        await hub.FlushAsync(Wait);
+        var aggregates = List(ingest.Requests("/v1/sessions").Single().Body["aggregates"]).Select(Map).ToList();
+        Assert.Equal(Sessions.MaxBuckets + 1, aggregates.Count);
+        Assert.Equal(Sessions.MaxBuckets + 500L, aggregates.Sum(x => (long)x["exited"]!));
+        Assert.Equal(500L, aggregates.Single(x => !x.ContainsKey("did"))["exited"]);
+    }
+
+    [Fact]
     public async Task DropsRefusedRequests()
     {
         var ingest = new FakeIngest { Answer = (_, _) => (400, new Dictionary<string, string>()) };
@@ -447,7 +697,7 @@ public class FixwireTests
             trace = job.TraceId;
             await http.GetAsync(new Uri("https://api.internal/prices?sku=1"));
             await http.PostAsync(new Uri("https://api.internal/fail"), null);
-            await http.GetAsync(new Uri("https://partner.example.com/hook"));
+            await http.GetAsync(new Uri("https://partner.example.com/hook?next=https://api.internal/"));
             Assert.Same(job, Span.Current);
             FixwireSdk.CaptureMessage("after");
         }

@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Fixwire.Internal;
 using Fixwire.Redaction;
 
@@ -16,6 +16,11 @@ public sealed class Client : IDisposable
     internal const string SdkName = "fixwire.dotnet";
 
     internal const string SdkVersion = "0.1.0";
+
+    /// <summary>The largest error or message the ingest takes, and the largest request of spans (sdks/PROTOCOL.md §3, §4).</summary>
+    internal const int MaxEventBytes = 1 << 20;
+
+    internal const int MaxSpanBytes = 5 << 20;
 
     private readonly Transport? _transport;
     private readonly Redactor? _redactor;
@@ -77,8 +82,23 @@ public sealed class Client : IDisposable
     /// <param name="exception">The exception.</param>
     public bool IsCaptured(Exception exception) => _captured.TryGetValue(exception, out _);
 
-    /// <summary>Sends an event with what the scope knows: its id, or null when not sent.</summary>
+    /// <summary>Sends an event with what the scope knows: its id, or null when not sent. Never throws.</summary>
     internal string? Capture(FixwireEvent e, Scope scope)
+    {
+        try
+        {
+            return Send(e, scope);
+        }
+#pragma warning disable CA1031 // capturing must never throw at the app (nor on the finalizer thread)
+        catch (Exception ex)
+        {
+            _transport?.Log("capturing an event: " + ex.Message);
+            return null;
+        }
+#pragma warning restore CA1031
+    }
+
+    private string? Send(FixwireEvent e, Scope scope)
     {
         if (_transport == null)
         {
@@ -96,8 +116,7 @@ public sealed class Client : IDisposable
         }
         if (e.Exception != null)
         {
-            _captured.Remove(e.Exception);
-            _captured.Add(e.Exception, true);
+            _captured.GetValue(e.Exception, _ => true); // atomic: threads capturing one exception don't collide
         }
         var held = Budget.Allow(Budget.IssueOf(e), DateTimeOffset.UtcNow);
         if (held < 0)
@@ -149,6 +168,14 @@ public sealed class Client : IDisposable
         try
         {
             body = Encode(Otlp.Logs(Options, new List<object?> { Otlp.EventRecord(e, _redactor) }));
+            if (body.Length > MaxEventBytes)
+            {
+                // Too large for the ingest: without what came before it and the extra details, or not at all.
+                e.Breadcrumbs = new List<Breadcrumb>();
+                e.Contexts = new Dictionary<string, IDictionary<string, object?>>();
+                e.Extra = new Dictionary<string, object?>();
+                body = Encode(Otlp.Logs(Options, new List<object?> { Otlp.EventRecord(e, _redactor) }));
+            }
         }
 #pragma warning disable CA1031 // an event that can't be encoded is dropped, not thrown at the app
         catch (Exception ex)
@@ -157,6 +184,11 @@ public sealed class Client : IDisposable
             return null;
         }
 #pragma warning restore CA1031
+        if (body.Length > MaxEventBytes)
+        {
+            _transport.Log("dropped an event: larger than the ingest takes");
+            return null;
+        }
         return _transport.Send("/v1/logs", Transport.Error, body) ? e.EventId : null;
     }
 
@@ -206,7 +238,7 @@ public sealed class Client : IDisposable
         {
             if (!string.IsNullOrEmpty(value))
             {
-                body[key] = value;
+                body[key] = Otlp.Clip(value!, Otlp.MaxString); // what a user typed may be any size
             }
         }
         Put("message", message);
@@ -217,7 +249,14 @@ public sealed class Client : IDisposable
         Put("name", f.Name ?? user?.Username);
         Put("email", f.Email ?? user?.Email);
         Put("url", f.Url);
-        body = Otlp.Scrub(body, _redactor);
+        try
+        {
+            body = Otlp.Scrub(body, _redactor);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return null; // not sent unmasked
+        }
         body["sdk"] = Sdk();
         body["feedback_id"] = id;
         body["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
@@ -237,7 +276,22 @@ public sealed class Client : IDisposable
         }
         try
         {
-            _transport.Send("/v1/traces", Transport.Span, Encode(Otlp.Traces(Options, spans, _redactor)));
+            var body = Encode(Otlp.Traces(Options, spans, _redactor));
+            if (body.Length > MaxSpanBytes)
+            {
+                // Too large for one request: in halves, and a span too large alone is dropped.
+                if (spans.Count > 1)
+                {
+                    SendSpans(spans.GetRange(0, spans.Count / 2));
+                    SendSpans(spans.GetRange(spans.Count / 2, spans.Count - (spans.Count / 2)));
+                }
+                else
+                {
+                    _transport.Log("dropped a span: larger than the ingest takes");
+                }
+                return;
+            }
+            _transport.Send("/v1/traces", Transport.Span, body);
         }
 #pragma warning disable CA1031 // spans that can't be encoded are dropped, not thrown at the app
         catch (Exception e)
@@ -257,10 +311,7 @@ public sealed class Client : IDisposable
     private static double NextDouble()
     {
         var b = new byte[8];
-        using (var rng = RandomNumberGenerator.Create())
-        {
-            rng.GetBytes(b);
-        }
+        Ids.Rng.GetBytes(b);
         return (BitConverter.ToUInt64(b, 0) >> 11) / (double)(1UL << 53);
     }
 

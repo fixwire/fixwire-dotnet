@@ -1,4 +1,5 @@
 using System.Net;
+using Fixwire.Extensions.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -138,6 +139,37 @@ public class AspNetCoreTests
         Assert.Equal(1L, aggregates.Sum(x => (long)x["exited"]!));
         Assert.Equal(2L, aggregates.Sum(x => (long)x["errored"]!));
         Assert.Equal(1L, aggregates.Sum(x => (long)x["crashed"]!));
+    }
+
+    [Fact]
+    public async Task LogsWrittenWhileCapturingAreNotCapturedAgain()
+    {
+        // A BeforeSend or BeforeBreadcrumb that logs would otherwise capture forever (and overflow the stack).
+        var ingest = new FakeIngest();
+        ILogger? log = null;
+        var hub = ingest.Hub(o =>
+        {
+            o.BeforeSend = e =>
+            {
+                log!.LogError("from BeforeSend");
+                return e;
+            };
+            o.BeforeBreadcrumb = b =>
+            {
+                log!.LogInformation("from BeforeBreadcrumb");
+                return b;
+            };
+        });
+        log = new FixwireLoggerProvider(new FixwireLoggingOptions()).CreateLogger("Shop.Orders");
+        using (hub.Bind())
+        {
+            log.LogInformation("order placed");
+            log.LogError("order failed");
+        }
+        await hub.FlushAsync(TimeSpan.FromSeconds(5));
+        var rec = LogRecords(ingest.Requests("/v1/logs")).Single();
+        var crumbs = List(Kv(rec["attributes"])["fixwire.breadcrumbs"]).Select(Map).ToList();
+        Assert.Equal("order placed", Assert.Single(crumbs)["message"]);
     }
 
     [Fact]

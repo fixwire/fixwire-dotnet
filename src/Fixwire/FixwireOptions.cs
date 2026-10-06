@@ -113,6 +113,10 @@ public sealed class FixwireOptions
         {
             SessionInterval = TimeSpan.FromMinutes(1);
         }
+        if (ShutdownTimeout < TimeSpan.Zero)
+        {
+            ShutdownTimeout = TimeSpan.FromSeconds(2); // Timeout.InfiniteTimeSpan would hang the exit
+        }
     }
 
     internal bool SessionsOn => AutoSessionTracking && !Empty(Release);

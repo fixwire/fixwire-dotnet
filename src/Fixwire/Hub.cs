@@ -86,12 +86,23 @@ public sealed class Hub
         {
             return null;
         }
-        var e = new FixwireEvent
+        FixwireEvent e;
+        try
         {
-            Exception = exception,
-            Exceptions = Frames.Chain(exception, mechanism, handled, c.Options),
-            Level = level ?? (handled ? null : Fixwire.Level.Fatal),
-        };
+            e = new FixwireEvent
+            {
+                Exception = exception,
+                Exceptions = Frames.Chain(exception, mechanism, handled, c.Options),
+                Level = level ?? (handled ? null : Fixwire.Level.Fatal),
+            };
+        }
+#pragma warning disable CA1031 // capturing must never throw at the app (the middleware rethrows the app's exception)
+        catch (Exception ex)
+        {
+            c.Transport?.Log("reading an exception: " + ex.Message);
+            return null;
+        }
+#pragma warning restore CA1031
         return Remember(c.Capture(e, Scope));
     }
 

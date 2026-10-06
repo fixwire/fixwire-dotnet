@@ -13,10 +13,16 @@ internal sealed class Budget
     private const int MaxIssues = 1024;
     private const int TopFrames = 5;
 
-    /// <summary>Parts of a message that change between occurrences.</summary>
+    /// <summary>The start of a message the fingerprint reads.</summary>
+    private const int MaxMessage = 1024;
+
+    /// <summary>
+    /// Parts of a message that change between occurrences. Linear: an address is looked for only
+    /// where a word starts (<c>\S+@\S+</c> tried at every position is cubic on "@@@…").
+    /// </summary>
     private static readonly Regex Variable = new(
         @"\b0x[0-9a-fA-F]+\b|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b|"
-            + @"\b[0-9a-fA-F]{16,}\b|[0-9]+(?:\.[0-9]+)?|\S+@\S+\.\w+",
+            + @"\b[0-9a-fA-F]{16,}\b|[0-9]+(?:\.[0-9]+)?|(?<!\S)[^\s@]+@\S*\.\w+",
         RegexOptions.CultureInvariant,
         TimeSpan.FromMilliseconds(100));
 
@@ -140,18 +146,36 @@ internal sealed class Budget
             }
             if (frames.Count == 0)
             {
-                parts.Add(Variable.Replace(e.Exceptions[0].Message ?? "", "<*>"));
+                parts.Add(Template(e.Exceptions[0].Message));
             }
         }
         else
         {
-            parts.Add(Variable.Replace(e.Message ?? "", "<*>"));
+            parts.Add(Template(e.Message));
         }
         if (e.Fingerprint.Count > 0)
         {
             parts.Add(string.Join("\u001f", e.Fingerprint));
         }
         return Fnv1a(string.Join("\u001e", parts));
+    }
+
+    /// <summary>The start of a message without the parts that vary; as it is if the regex times out.</summary>
+    private static string Template(string? message)
+    {
+        var m = message ?? "";
+        if (m.Length > MaxMessage)
+        {
+            m = m.Substring(0, MaxMessage);
+        }
+        try
+        {
+            return Variable.Replace(m, "<*>");
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return m; // a starved thread: an approximate fingerprint, never an exception at the app
+        }
     }
 
     private static string Fnv1a(string s)

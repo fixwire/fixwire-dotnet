@@ -23,6 +23,15 @@ internal sealed class Transport : IDisposable
 
     public static readonly TimeSpan MaxWait = TimeSpan.FromMinutes(5);
 
+    /// <summary>The longest pause Fixwire-Rate-Limits may ask for.</summary>
+    private const long MaxPauseSeconds = 24 * 60 * 60;
+
+    /// <summary>The kinds of data Fixwire-Rate-Limits may name; it names no others (and "" is all of them).</summary>
+    private static readonly HashSet<string> Categories = new(StringComparer.Ordinal)
+    {
+        "", Error, "log", Span, Session, CheckIn, Feedback, "file",
+    };
+
     private static readonly char[] Colon = [':'];
 
     /// <summary>The first retry's wait, halved (tests shorten it).</summary>
@@ -52,11 +61,15 @@ internal sealed class Transport : IDisposable
     {
         _dsn = dsn;
         _options = options;
+        // The SDK's own handler follows no redirect: the key goes to the DSN's host and nowhere else.
         _http = options.HttpMessageHandler is { } handler
             ? new HttpClient(handler, disposeHandler: false)
-            : new HttpClient();
+            : new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
         _http.Timeout = options.Timeout;
-        _worker = Task.Run(RunAsync);
+        using (ExecutionContext.SuppressFlow())
+        {
+            _worker = Task.Run(RunAsync); // without the caller's span, hub or Activity: its requests are no part of the app's work
+        }
     }
 
     private static TaskCompletionSource<bool> NewIdle(bool done)
@@ -99,7 +112,14 @@ internal sealed class Transport : IDisposable
     private void Enqueue(Item item)
     {
         _queue.Enqueue(item);
-        _ready.Release();
+        try
+        {
+            _ready.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+            Done(); // closed while it was queued
+        }
     }
 
     private void Done()
@@ -225,7 +245,15 @@ internal sealed class Transport : IDisposable
                 return;
             }
             var backoff = TimeSpan.FromTicks(BackoffUnit.Ticks * (1L << item.Attempts));
-            Later(item, backoff > retryAfter ? backoff : retryAfter);
+            var later = backoff > retryAfter ? backoff : retryAfter;
+            if (later > MaxWait)
+            {
+                // A request parked for hours would hold its place in the queue all that time.
+                Log($"dropping a {item.Category} request: told to wait {later.TotalSeconds:0} s");
+                Done();
+                return;
+            }
+            Later(item, later);
         }
         else
         {
@@ -250,9 +278,10 @@ internal sealed class Transport : IDisposable
         request.Content.Headers.ContentEncoding.Add("gzip");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _dsn.Key);
         request.Headers.UserAgent.ParseAdd(Client.SdkName + "/" + Client.SdkVersion);
-        using var response = await _http.SendAsync(request, _stop.Token).ConfigureAwait(false);
+        // Only the status and headers are read: the body is never buffered, whatever its size.
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _stop.Token).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow;
-        var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.Zero;
+        var retryAfter = RetryAfter(response.Headers.RetryAfter, now);
         string? limits = response.Headers.TryGetValues("Fixwire-Rate-Limits", out var v) ? string.Join(",", v) : null;
         Limit(limits, now);
         if ((int)response.StatusCode == 429 && limits == null)
@@ -261,6 +290,13 @@ internal sealed class Transport : IDisposable
             Limit(secs.ToString(CultureInfo.InvariantCulture) + ":", now);
         }
         return ((int)response.StatusCode, retryAfter);
+    }
+
+    /// <summary>Retry-After as a wait: seconds or an HTTP date, never negative.</summary>
+    internal static TimeSpan RetryAfter(RetryConditionHeaderValue? header, DateTimeOffset now)
+    {
+        var wait = header?.Delta ?? (header?.Date is { } date ? date - now : TimeSpan.Zero);
+        return wait > TimeSpan.Zero ? wait : TimeSpan.Zero;
     }
 
     /// <summary>Reads <c>&lt;seconds&gt;:&lt;category;…&gt;, …</c>; no categories means all.</summary>
@@ -279,11 +315,15 @@ internal sealed class Transport : IDisposable
                 {
                     continue;
                 }
-                var until = now.AddSeconds(secs);
+                var until = now.AddSeconds(Math.Min(secs, MaxPauseSeconds));
                 var cats = sc.Length > 1 ? sc[1].Trim() : "";
                 foreach (var cat in cats.Length == 0 ? new[] { "" } : cats.Split(';'))
                 {
                     var name = cat.Trim();
+                    if (!Categories.Contains(name))
+                    {
+                        continue; // the map stays as small as the protocol's list
+                    }
                     if (!_paused.TryGetValue(name, out var was) || until > was)
                     {
                         _paused[name] = until;

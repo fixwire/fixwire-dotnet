@@ -234,6 +234,10 @@ public sealed class Scope
         {
             breadcrumb.Timestamp = DateTimeOffset.UtcNow;
         }
+        if (breadcrumb.Message is { Length: > Otlp.MaxRead } message)
+        {
+            breadcrumb.Message = Otlp.Clip(message, Otlp.MaxRead); // kept for a while: no more than an event reads of it
+        }
         lock (_lock)
         {
             _breadcrumbs.Enqueue(breadcrumb);

@@ -45,7 +45,7 @@ public sealed class OutgoingRequest
                     .StartDetached();
             }
             var from = span ?? parent;
-            if (from != null && hub.Client is { } client && client.ShouldPropagate(url))
+            if (from != null && hub.Client is { } client && client.ShouldPropagate(plain)) // a target named in the query doesn't count
             {
                 setHeader("traceparent", from.Traceparent);
                 if (from.Tracestate != null)

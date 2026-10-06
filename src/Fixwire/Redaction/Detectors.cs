@@ -15,8 +15,8 @@ namespace Fixwire.Redaction;
 /// "k" and the long s next to "s" as the server folds them. Atomic groups stand where the next token
 /// cannot match what they took: the same matches without backtracking.
 ///
-/// Two of the server's patterns are scanners here (private keys, URL credentials): they find the
-/// same matches, but a backtracking engine would take quadratic time on some text.
+/// Three of the server's patterns are scanners here (private keys, JWTs, URL credentials): they
+/// find the same matches, but a backtracking engine would take quadratic time on some text.
 /// </remarks>
 internal static class Detectors
 {
@@ -49,6 +49,12 @@ internal static class Detectors
 #else
     internal const RegexOptions Options = RegexOptions.None;
 #endif
+
+    /// <summary>
+    /// A bound on every pattern, though none backtracks far: text that cannot be searched in time
+    /// throws (and what holds it is not sent) rather than going out unmasked.
+    /// </summary>
+    internal static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(1);
 
     /// <summary>Every detector, in the server's order.</summary>
     internal static readonly IReadOnlyList<Detector> Registry = Array.AsReadOnly(new[]
@@ -92,11 +98,7 @@ internal static class Detectors
             ExactCase,
             Literals("sk-"),
             Start + @"sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{40,}|[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20})"),
-        Detector.Pattern(
-            "jwt",
-            ExactCase,
-            Literals("eyJ"),
-            Start + @"eyJ(?>[A-Za-z0-9_-]{8,})\.eyJ(?>[A-Za-z0-9_-]{8,})\.[A-Za-z0-9_-]{8,}"),
+        Detector.Scanner("jwt", ExactCase, Literals("eyJ"), JwtSpans),
         Detector.Pattern(
             "fixwire_secret_key",
             ExactCase,
@@ -691,6 +693,64 @@ internal static class Detectors
     }
 
     private static bool IsUpper(char c) => c >= 'A' && c <= 'Z';
+
+    /// <summary>The end of the run of <c>[A-Za-z0-9_-]</c> from i.</summary>
+    private static int JwtRunEnd(string s, int i)
+    {
+        while (i < s.Length && (IsWord(s[i]) || s[i] == '-'))
+        {
+            i++;
+        }
+
+        return i;
+    }
+
+    /// <summary>
+    /// The server's <c>\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}</c>. Every
+    /// start inside the header's run reaches the same dot and fails as the first did, so the search
+    /// goes on past it ("eyJ-eyJ-…" would otherwise be quadratic).
+    /// </summary>
+    private static List<TextSpan> JwtSpans(Text t)
+    {
+        string s = t.S;
+        var output = new List<TextSpan>();
+        for (int start = s.IndexOf("eyJ", StringComparison.Ordinal); start >= 0;)
+        {
+            if (start > 0 && IsWord(s[start - 1]))
+            {
+                start = s.IndexOf("eyJ", start + 1, StringComparison.Ordinal);
+                continue;
+            }
+
+            int header = JwtRunEnd(s, start + 3);
+            int end = -1;
+            if (header - start - 3 >= 8 && JwtDotEyJ(s, header))
+            {
+                int payload = JwtRunEnd(s, header + 4);
+                if (payload - header - 4 >= 8 && payload < s.Length && s[payload] == '.')
+                {
+                    int signature = JwtRunEnd(s, payload + 1);
+                    if (signature - payload - 1 >= 8)
+                    {
+                        end = signature;
+                    }
+                }
+            }
+
+            if (end >= 0)
+            {
+                output.Add(new TextSpan(start, end));
+            }
+
+            start = s.IndexOf("eyJ", end >= 0 ? end : header, StringComparison.Ordinal);
+        }
+
+        return output;
+    }
+
+    /// <summary>Whether ".eyJ" is at i.</summary>
+    private static bool JwtDotEyJ(string s, int i) =>
+        i + 4 <= s.Length && string.CompareOrdinal(s, i, ".eyJ", 0, 4) == 0;
 
     private static bool IsLetter(char c) => (c >= 'a' && c <= 'z') || IsUpper(c);
 

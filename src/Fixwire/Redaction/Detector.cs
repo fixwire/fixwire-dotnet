@@ -82,7 +82,7 @@ internal sealed class Detector
         Func<string, bool>? validate = null,
         Func<string, bool>? may = null,
         int minCodePoints = 0) =>
-        new(name, caseSensitive, prefilter, may, new Regex(regex, Detectors.Options), group, minCodePoints, validate, null);
+        new(name, caseSensitive, prefilter, may, new Regex(regex, Detectors.Options, Detectors.MatchTimeout), group, minCodePoints, validate, null);
 
     /// <summary>A detector built on a scanner.</summary>
     internal static Detector Scanner(

@@ -36,7 +36,7 @@ internal static class Frames
             {
                 Type = type.FullName ?? type.Name,
                 Module = type.Namespace ?? "",
-                Message = e.Message,
+                Message = MessageOf(e),
                 Mechanism = chain.Count == 0 ? mechanism : "chained",
                 Handled = handled,
                 Frames = Of(new StackTrace(e, fNeedFileInfo: true), options),
@@ -48,6 +48,21 @@ internal static class Frames
             chain[0].Frames = Of(new StackTrace(1, fNeedFileInfo: true), options, skipSdk: true);
         }
         return chain;
+    }
+
+    /// <summary>An exception's message; null when its Message throws (the type still says what it was).</summary>
+    internal static string? MessageOf(Exception e)
+    {
+        try
+        {
+            return e.Message;
+        }
+#pragma warning disable CA1031 // an exception type's own bug must not lose its event
+        catch (Exception)
+        {
+            return null;
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>A stack trace (the newest call first) as frames, the oldest first.</summary>

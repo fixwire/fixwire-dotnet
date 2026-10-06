@@ -9,6 +9,18 @@ internal static class Otlp
 {
     private const int MaxDepth = 10;
 
+    /// <summary>The characters a string keeps when sent.</summary>
+    internal const int MaxString = 16 * 1024;
+
+    /// <summary>
+    /// The characters of a string redaction reads: twice what is kept, so that a secret the cut goes
+    /// through is still found (and then cut off).
+    /// </summary>
+    internal const int MaxRead = 2 * MaxString;
+
+    /// <summary>The items kept of a list or dictionary inside a value.</summary>
+    private const int MaxItems = 1000;
+
     /// <summary>The resource every request carries: who sends, release, environment.</summary>
     public static Dictionary<string, object?> Resource(FixwireOptions o) => new()
     {
@@ -60,6 +72,10 @@ internal static class Otlp
             plain["fixwire.op"] = op;
             m["attributes"] = Attributes(plain);
             m["name"] = Mask((string?)m["name"], redactor);
+            if (m["status"] is Dictionary<string, object?> status && status.TryGetValue("message", out var message))
+            {
+                status["message"] = Mask((string?)message, redactor); // an exception's message
+            }
             items.Add(m);
         }
         return new Dictionary<string, object?>
@@ -218,18 +234,46 @@ internal static class Otlp
         return redactor.Walk(m, ref count) as Dictionary<string, object?> ?? new Dictionary<string, object?>();
     }
 
+    /// <summary>A string masked, and cut to what is kept.</summary>
     public static string? Mask(string? s, Redactor? redactor) =>
-        redactor == null || string.IsNullOrEmpty(s) ? s : redactor.Mask(s).Text;
+        string.IsNullOrEmpty(s) ? s : Clip(redactor == null ? s! : redactor.Mask(Clip(s!, MaxRead)).Text!, MaxString);
+
+    /// <summary>s cut to max characters, "..." ending it (a surrogate pair stays whole).</summary>
+    internal static string Clip(string s, int max)
+    {
+        if (s.Length <= max)
+        {
+            return s;
+        }
+        var cut = max - 3;
+        if (char.IsHighSurrogate(s[cut - 1]))
+        {
+            cut--;
+        }
+#if NET
+        return string.Concat(s.AsSpan(0, cut), "...");
+#else
+        return s.Substring(0, cut) + "...";
+#endif
+    }
 
     public static Dictionary<string, object?> PlainMap(IDictionary m) => (Dictionary<string, object?>)Plain(m, 0)!;
 
-    /// <summary>A value in JSON's own types: dictionaries with string keys, lists, strings, numbers, booleans, null.</summary>
-    public static object? Plain(object? v, int depth)
+    /// <summary>
+    /// A value in JSON's own types: dictionaries with string keys, lists, strings, numbers, booleans,
+    /// null. Bounded: strings to what redaction reads, containers in depth and (inside the value) in
+    /// items; a container inside itself, and one whose enumeration throws, become a string.
+    /// </summary>
+    public static object? Plain(object? v, int depth) => Plain(v, depth, null);
+
+    private static object? Plain(object? v, int depth, List<object>? path)
     {
         switch (v)
         {
-            case null or string or bool:
+            case null or bool:
                 return v;
+            case string s:
+                return Clip(s, MaxRead);
             case int or long or short or byte or sbyte or uint or ushort or ulong or double or float or decimal:
                 return v;
             case Enum en:
@@ -238,23 +282,77 @@ internal static class Otlp
                 return dto.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
             case DateTime dt:
                 return dt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
-            case IDictionary d when depth <= MaxDepth:
-                var map = new Dictionary<string, object?>();
-                foreach (DictionaryEntry e in d)
-                {
-                    map[Convert.ToString(e.Key, CultureInfo.InvariantCulture) ?? ""] = Plain(e.Value, depth + 1);
-                }
-                return map;
             case IEnumerable items when depth <= MaxDepth:
-                var list = new List<object?>();
-                foreach (var item in items)
+                path ??= new List<object>();
+                foreach (var outer in path)
                 {
-                    list.Add(Plain(item, depth + 1));
+                    if (ReferenceEquals(outer, v))
+                    {
+                        return "[Circular ~]";
+                    }
                 }
-                return list;
+                path.Add(v);
+                try
+                {
+                    return Container(items, depth, path);
+                }
+#pragma warning disable CA1031 // a collection changed while read, a lazy sequence that fails, …
+                catch (Exception)
+                {
+                    return "[Unreadable]";
+                }
+#pragma warning restore CA1031
+                finally
+                {
+                    path.RemoveAt(path.Count - 1);
+                }
             default:
-                return Convert.ToString(v, CultureInfo.InvariantCulture); // Guid, Uri, deep values, …
+                return Text(v); // Guid, Uri, deep values, …
         }
+    }
+
+    private static object Container(IEnumerable items, int depth, List<object> path)
+    {
+        var max = depth == 0 ? int.MaxValue : MaxItems; // the top is the attributes: each is kept
+        var n = 0;
+        if (items is IDictionary d)
+        {
+            var map = new Dictionary<string, object?>();
+            foreach (DictionaryEntry e in d)
+            {
+                if (n++ == max)
+                {
+                    break;
+                }
+                map[Text(e.Key)] = Plain(e.Value, depth + 1, path);
+            }
+            return map;
+        }
+        var list = new List<object?>();
+        foreach (var item in items)
+        {
+            if (n++ == max)
+            {
+                break; // an endless sequence ends here
+            }
+            list.Add(Plain(item, depth + 1, path));
+        }
+        return list;
+    }
+
+    /// <summary>A value's string, cut to what redaction reads; "[Unreadable]" when its ToString throws.</summary>
+    private static string Text(object v)
+    {
+        try
+        {
+            return Clip(Convert.ToString(v, CultureInfo.InvariantCulture) ?? "", MaxRead);
+        }
+#pragma warning disable CA1031 // the app's ToString must not cost the event
+        catch (Exception)
+        {
+            return "[Unreadable]";
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>OTLP key-values, empty values left out.</summary>
@@ -289,7 +387,7 @@ internal static class Otlp
             case null:
                 return new() { ["stringValue"] = "" };
             case string s:
-                return new() { ["stringValue"] = s };
+                return new() { ["stringValue"] = Clip(s, MaxString) }; // read (and redacted) further, kept to here
             case bool b:
                 return new() { ["boolValue"] = b };
             case int or long or short or byte or sbyte or uint or ushort:

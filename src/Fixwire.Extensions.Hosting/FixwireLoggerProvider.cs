@@ -26,6 +26,13 @@ public sealed class FixwireLoggerProvider : ILoggerProvider
 
     private sealed class FixwireLogger(string category, FixwireLoggingOptions options) : ILogger
     {
+        /// <summary>
+        /// Whether this thread is inside Log already: a record logged while one is captured (by
+        /// BeforeSend, BeforeBreadcrumb, an exception's ToString) is not captured again.
+        /// </summary>
+        [ThreadStatic]
+        private static bool _logging;
+
         // The SDK's own records never go back to Fixwire.
         private readonly bool _own = category == "Fixwire"
             || category.StartsWith("Fixwire.Extensions.", StringComparison.Ordinal)
@@ -39,12 +46,29 @@ public sealed class FixwireLoggerProvider : ILoggerProvider
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (!IsEnabled(logLevel) || !FixwireSdk.IsEnabled)
+            if (_logging || !IsEnabled(logLevel) || !FixwireSdk.IsEnabled)
             {
                 return;
             }
+            _logging = true;
+            try
+            {
+                Capture(logLevel, eventId, formatter(state, exception), exception);
+            }
+#pragma warning disable CA1031 // the app's log call must never fail because of Fixwire
+            catch (Exception)
+            {
+            }
+#pragma warning restore CA1031
+            finally
+            {
+                _logging = false;
+            }
+        }
+
+        private void Capture(LogLevel logLevel, EventId eventId, string message, Exception? exception)
+        {
             var hub = Hub.Current;
-            var message = formatter(state, exception);
             var level = LevelOf(logLevel);
             if (logLevel >= options.EventLevel)
             {

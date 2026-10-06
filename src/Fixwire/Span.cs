@@ -39,6 +39,11 @@ public sealed class Span : IDisposable
     /// <summary>The spans a segment keeps until it is sent.</summary>
     internal const int MaxChildren = 1000;
 
+    /// <summary>The longest <c>tracestate</c> and <c>baggage</c> passed on (the W3C specs' limits).</summary>
+    internal const int MaxTracestate = 512;
+
+    internal const int MaxBaggage = 8192;
+
     private readonly object _lock = new();
     private readonly Dictionary<string, object?> _attributes;
     private readonly long _startTicks = Stopwatch.GetTimestamp();
@@ -68,8 +73,8 @@ public sealed class Span : IDisposable
             ParentSpanId = continued.Value.ParentId;
             Sampled = continued.Value.Sampled;
             _remoteParent = true;
-            Tracestate = b.Tracestate;
-            Baggage = b.Baggage;
+            Tracestate = Passable(b.Tracestate, MaxTracestate);
+            Baggage = Passable(b.Baggage, MaxBaggage);
             _segment = this;
         }
         else if (parent != null)
@@ -154,7 +159,7 @@ public sealed class Span : IDisposable
             _failed = true;
             if (exception != null)
             {
-                _statusMessage = exception.Message;
+                _statusMessage = Frames.MessageOf(exception);
                 _attributes["error.type"] = exception.GetType().FullName;
             }
         }
@@ -283,6 +288,23 @@ public sealed class Span : IDisposable
         }
         var flags = int.Parse(p[3], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture);
         return (p[1].ToLowerInvariant(), p[2].ToLowerInvariant(), (flags & 1) == 1);
+    }
+
+    /// <summary>A caller's header to pass on to the services this one calls: null when too long or not one line of text.</summary>
+    private static string? Passable(string? value, int max)
+    {
+        if (value == null || value.Length > max)
+        {
+            return null;
+        }
+        foreach (var c in value)
+        {
+            if ((c < ' ' && c != '\t') || c == '\u007f')
+            {
+                return null;
+            }
+        }
+        return value;
     }
 
     private static bool IsHex(string s)
@@ -425,13 +447,13 @@ internal static class Ids
 {
     private const string Hex = "0123456789abcdef";
 
+    /// <summary>One generator for every id (safe across threads): making one per span is costly on .NET Framework.</summary>
+    public static readonly RandomNumberGenerator Rng = RandomNumberGenerator.Create();
+
     public static string New(int bytes)
     {
         var b = new byte[bytes];
-        using (var rng = RandomNumberGenerator.Create())
-        {
-            rng.GetBytes(b);
-        }
+        Rng.GetBytes(b);
         var allZero = true;
         var c = new char[bytes * 2];
         for (var i = 0; i < bytes; i++)

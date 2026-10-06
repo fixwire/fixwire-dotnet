@@ -43,6 +43,9 @@ internal sealed class RequestSession
 /// </summary>
 internal sealed class Sessions : IDisposable
 {
+    /// <summary>The (minute, user) counts kept between sends; past it, requests count without their user.</summary>
+    internal const int MaxBuckets = 5000;
+
     private readonly Client _client;
     private readonly object _lock = new();
     private readonly Timer _timer;
@@ -51,7 +54,7 @@ internal sealed class Sessions : IDisposable
     public Sessions(Client client, TimeSpan interval)
     {
         _client = client;
-        _timer = new Timer(_ => Send(), null, interval, interval);
+        _timer = new Timer(_ => SendQuietly(), null, interval, interval);
     }
 
     /// <summary>Counts a request that ended.</summary>
@@ -63,8 +66,15 @@ internal sealed class Sessions : IDisposable
         {
             if (!_buckets.TryGetValue(key, out var counts))
             {
-                counts = new int[3];
-                _buckets[key] = counts;
+                if (_buckets.Count >= MaxBuckets)
+                {
+                    key = (key.Item1, null); // many users at once: counted without theirs, so the body stays under 1 MB
+                }
+                if (!_buckets.TryGetValue(key, out counts))
+                {
+                    counts = new int[3];
+                    _buckets[key] = counts;
+                }
             }
             counts[status == "crashed" ? 2 : status == "errored" ? 1 : 0]++;
         }
@@ -106,6 +116,21 @@ internal sealed class Sessions : IDisposable
             ["environment"] = _client.Options.Environment,
             ["aggregates"] = aggregates,
         });
+    }
+
+    /// <summary>Sends, from the timer.</summary>
+    private void SendQuietly()
+    {
+        try
+        {
+            Send();
+        }
+#pragma warning disable CA1031 // an exception in a timer's callback ends the process
+        catch (Exception e)
+        {
+            _client.Transport?.Log("sending sessions: " + e.Message);
+        }
+#pragma warning restore CA1031
     }
 
     public void Dispose() => _timer.Dispose();

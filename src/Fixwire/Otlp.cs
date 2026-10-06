@@ -4,7 +4,7 @@ using Fixwire.Redaction;
 
 namespace Fixwire;
 
-/// <summary>Events and spans as OTLP JSON (sdks/PROTOCOL.md §3, §4), within the bounds of §13.</summary>
+/// <summary>Events and spans as OTLP JSON (fixwire-protocol §3, §4), within the bounds of §13.</summary>
 internal static class Otlp
 {
     private const int MaxDepth = 10;
@@ -93,7 +93,7 @@ internal static class Otlp
         };
     }
 
-    /// <summary>An error or a message as a log record (sdks/PROTOCOL.md §4), redacted.</summary>
+    /// <summary>An error or a message as a log record (fixwire-protocol §4), redacted.</summary>
     public static Dictionary<string, object?> EventRecord(FixwireEvent e, FixwireOptions o, Redactor? redactor)
     {
         var max = o.MaxValueLength;

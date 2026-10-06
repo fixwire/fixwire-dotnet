@@ -16,7 +16,7 @@ public sealed class Client : IDisposable
 
     internal const string SdkVersion = "0.1.0";
 
-    /// <summary>The largest error or message the ingest takes, and the largest request of spans (sdks/PROTOCOL.md §3, §4).</summary>
+    /// <summary>The largest error or message the ingest takes, and the largest request of spans (fixwire-protocol §3, §4).</summary>
     internal const int MaxEventBytes = 1 << 20;
 
     internal const int MaxSpanBytes = 5 << 20;

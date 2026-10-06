@@ -5,7 +5,7 @@ using static Fixwire.Tests.FakeIngest;
 
 namespace Fixwire.Tests;
 
-/// <summary>The bounds every Fixwire SDK keeps (sdks/PROTOCOL.md §13), at their edges.</summary>
+/// <summary>The bounds every Fixwire SDK keeps (fixwire-protocol §13), at their edges.</summary>
 public class GuaranteesTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(5);

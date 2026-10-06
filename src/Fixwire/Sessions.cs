@@ -39,7 +39,7 @@ internal sealed class RequestSession
 
 /// <summary>
 /// Release health for servers: each request is a session, counted per minute and user and sent
-/// about every minute (sdks/PROTOCOL.md §5).
+/// about every minute (fixwire-protocol §5).
 /// </summary>
 internal sealed class Sessions : IDisposable
 {

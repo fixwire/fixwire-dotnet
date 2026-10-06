@@ -4,7 +4,7 @@ A small minimal API with Fixwire set up the way a production service would
 be: one line of code and a configuration section.
 
 ```sh
-Fixwire__Dsn=https://<key>@<host> dotnet run --project examples/ShopApi   # from sdks/dotnet
+Fixwire__Dsn=https://<key>@<host> dotnet run --project examples/ShopApi   # from the repository root
 ```
 
 It reserves stock at an inventory service (`Inventory:Url`, default

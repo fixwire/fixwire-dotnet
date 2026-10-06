@@ -2,7 +2,7 @@
 
 Real apps, each with its own README. `Examples.Tests` starts each against a
 fake ingest and checks what Fixwire receives, so they keep working
-(`dotnet test` in `sdks/dotnet` runs it).
+(`dotnet test` at the repository root runs it).
 
 | Example | Shows |
 |---|---|

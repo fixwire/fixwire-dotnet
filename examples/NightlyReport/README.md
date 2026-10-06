@@ -1,7 +1,7 @@
 # Nightly report (a worker-service cron job)
 
 ```sh
-Fixwire__Dsn=https://<key>@<host> dotnet run --project examples/NightlyReport   # from sdks/dotnet
+Fixwire__Dsn=https://<key>@<host> dotnet run --project examples/NightlyReport   # from the repository root
 ```
 
 The job builds a report per account. One account (`globex`) has no

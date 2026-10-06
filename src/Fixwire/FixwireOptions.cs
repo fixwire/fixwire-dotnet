@@ -144,7 +144,39 @@ public sealed class FixwireOptions
 
     internal const int DefaultMaxValueLength = 1024;
 
+    /// <summary>The longest <see cref="Timeout"/> <c>HttpClient</c> takes (about 24 days).</summary>
+    private static readonly TimeSpan MaxTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
+
+    /// <summary>The longest <see cref="SessionInterval"/> a timer takes (about 49 days).</summary>
+    private static readonly TimeSpan MaxSessionInterval = TimeSpan.FromMilliseconds(uint.MaxValue - 1.0);
+
     internal bool SessionsOn => AutoSessionTracking && !Empty(Release);
+
+    /// <summary>
+    /// What keeps options with a DSN from being used (the DSN read into dsn): null when nothing
+    /// does. Reported rather than thrown, so that a typo in configuration can't stop the app.
+    /// </summary>
+    internal string? Broken(out Dsn? dsn)
+    {
+        dsn = null;
+        try
+        {
+            dsn = Fixwire.Dsn.Parse(Dsn);
+        }
+        catch (ArgumentException)
+        {
+            return "the DSN must look like https://<key>@<host>"; // not the DSN itself: it holds the key
+        }
+        if (Timeout > MaxTimeout)
+        {
+            return "Timeout must be at most 24 days";
+        }
+        if (SessionsOn && SessionInterval > MaxSessionInterval)
+        {
+            return "SessionInterval must be at most 49 days";
+        }
+        return null;
+    }
 
     internal static bool Empty(string? s) => string.IsNullOrWhiteSpace(s);
 

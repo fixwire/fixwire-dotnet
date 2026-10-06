@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using static Fixwire.Tests.FakeIngest;
 
@@ -193,5 +194,48 @@ public class AspNetCoreTests
         Assert.Equal("System.DivideByZeroException", a["exception.type"]);
         Assert.Equal(false, a["fixwire.handled"]);
         Assert.Equal("GET /report", a["fixwire.transaction"]);
+    }
+
+    [Fact]
+    public async Task AMalformedDsnLeavesTheAppRunning()
+    {
+        // AddFixwire never throws: the DSN is said on stderr (without the key) and Fixwire stays off.
+        var was = Console.Error;
+        var said = new StringWriter();
+        Console.SetError(said);
+        try
+        {
+            var host = Host.CreateApplicationBuilder();
+            host.Logging.ClearProviders();
+            host.Configuration["Fixwire:Dsn"] = "fw_pk_live_secret@ingest.fixwire.io"; // no scheme
+            host.AddFixwire(o => o.CaptureUnhandledExceptions = false);
+            using (host.Build())
+            {
+                Assert.False(FixwireSdk.IsEnabled);
+            }
+
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseUrls("http://127.0.0.1:0");
+            builder.Logging.ClearProviders();
+            builder.Configuration["Fixwire:Dsn"] = "https://:secret@ingest.fixwire.io"; // no key
+            builder.AddFixwire(o => o.CaptureUnhandledExceptions = false);
+            var app = builder.Build();
+            await using (app)
+            {
+                app.MapGet("/", () => "up");
+                await app.StartAsync();
+                Assert.False(FixwireSdk.IsEnabled);
+                var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
+                using var http = new HttpClient { BaseAddress = new Uri(address) };
+                Assert.Equal("up", await http.GetStringAsync(new Uri("/", UriKind.Relative)));
+                await app.StopAsync();
+            }
+        }
+        finally
+        {
+            Console.SetError(was);
+        }
+        Assert.Equal(2, said.ToString().Split("fixwire: the DSN must look like https://<key>@<host>; Fixwire is off").Length - 1);
+        Assert.DoesNotContain("secret", said.ToString(), StringComparison.Ordinal);
     }
 }

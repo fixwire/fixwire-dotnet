@@ -30,9 +30,12 @@ public sealed class Client : IDisposable
     private readonly Redactor? _redactor;
     private readonly ConditionalWeakTable<Exception, object> _captured = new();
 
-    /// <summary>A client for the options; without a DSN it is disabled and sends nothing.</summary>
+    /// <summary>
+    /// A client for the options; without a DSN it is disabled and sends nothing. It never throws: a
+    /// malformed DSN, or an option out of range, is said on stderr and the client is disabled, so
+    /// that a typo in configuration can't stop the app from starting.
+    /// </summary>
     /// <param name="options">The options; defaults are filled in from the environment.</param>
-    /// <exception cref="ArgumentException">The DSN is malformed.</exception>
     public Client(FixwireOptions options)
     {
         options.ApplyDefaults();
@@ -45,12 +48,31 @@ public sealed class Client : IDisposable
         {
             return;
         }
-        _transport = new Transport(Dsn.Parse(options.Dsn), options);
+        if (options.Broken(out var dsn) is { } broken)
+        {
+            Warn(broken + "; Fixwire is off");
+            return;
+        }
+        _transport = new Transport(dsn!, options);
         Enabled = true;
         if (options.SessionsOn)
         {
             Sessions = new Sessions(this, options.SessionInterval);
         }
+    }
+
+    /// <summary>Says something on stderr whether or not <see cref="FixwireOptions.Debug"/> is on.</summary>
+    private static void Warn(string message)
+    {
+        try
+        {
+            Console.Error.WriteLine("fixwire: " + message);
+        }
+#pragma warning disable CA1031 // a closed or broken stderr must not stop the app
+        catch (Exception)
+        {
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>Whether the client sends: false without a DSN.</summary>
@@ -297,13 +319,15 @@ public sealed class Client : IDisposable
         {
             return null;
         }
-        var id = checkIn.Id ?? Ids.New(16);
+        // The app's configuration (slug, schedule, environment): cut, not masked.
+        var max = Options.MaxValueLength;
+        var id = Otlp.Clip(checkIn.Id ?? Ids.New(16), max);
         var body = new Dictionary<string, object?>
         {
             ["sdk"] = Sdk(),
             ["check_in_id"] = id,
             ["status"] = CheckIn.Wire(checkIn.Status),
-            ["environment"] = Options.Environment,
+            ["environment"] = Otlp.Clip(Options.Environment!, max),
         };
         if (checkIn.Duration is { } d && d > TimeSpan.Zero)
         {
@@ -311,9 +335,9 @@ public sealed class Client : IDisposable
         }
         if (checkIn.Config != null)
         {
-            body["monitor_config"] = checkIn.Config.ToWire();
+            body["monitor_config"] = checkIn.Config.ToWire(max);
         }
-        return SendJson("/v1/check-ins/" + Uri.EscapeDataString(checkIn.Monitor), Transport.CheckIn, body) ? id : null;
+        return SendJson("/v1/check-ins/" + Uri.EscapeDataString(Otlp.Clip(checkIn.Monitor, max)), Transport.CheckIn, body) ? id : null;
     }
 
     internal string? CaptureFeedback(Feedback f, Scope scope, Span? current)
@@ -343,15 +367,9 @@ public sealed class Client : IDisposable
         Put("name", f.Name ?? user?.Username);
         Put("email", f.Email ?? user?.Email);
         Put("url", f.Url);
-        // Masked, then cut: redaction reads past the cut.
+        // What they said is masked (reading past the cut); ids and the app's configuration
+        // (release, environment) are sent as given. Then every string is cut.
         body = Otlp.Scrub(body, _redactor);
-        foreach (var key in body.Keys.ToList())
-        {
-            if (body[key] is string s)
-            {
-                body[key] = Otlp.Clip(s, max);
-            }
-        }
         body["sdk"] = Sdk();
         body["feedback_id"] = id;
         body["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
@@ -360,6 +378,13 @@ public sealed class Client : IDisposable
         Put("trace_id", f.TraceId ?? (current ?? scope.Span)?.TraceId);
         Put("event_id", f.EventId);
         Put("release", Options.Release);
+        foreach (var key in body.Keys.ToList())
+        {
+            if (body[key] is string s)
+            {
+                body[key] = Otlp.Clip(s, max);
+            }
+        }
         return SendJson("/v1/feedback", Transport.Feedback, body) ? id : null;
     }
 

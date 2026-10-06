@@ -93,6 +93,69 @@ public class GuaranteesTests
     }
 
     [Fact]
+    public async Task ConfigurationIsCutButNotMasked()
+    {
+        // The app's configuration is sent as given (masking "api@1.2.3.example" as an email would
+        // break release health), cut to MaxValueLength; the app's data is masked.
+        const string Release = "api@1.2.3.example";
+        var environment = "ops-ada@example.com-" + new string('e', 100);
+        var slug = "nightly-ada@example.com-" + new string('n', 100);
+        var crontab = "0 3 * * * ada@example.com " + new string('c', 100);
+        var timezone = "Europe/ada@example.com/" + new string('z', 100);
+        static string Cut(string s) => s[..61] + "..."; // 64 bytes
+        var ingest = new FakeIngest();
+        var hub = ingest.Hub(o =>
+        {
+            o.MaxValueLength = 64;
+            o.Release = Release;
+            o.Environment = environment;
+            o.ServerName = "web-ada@example.com";
+            o.TracesSampleRate = 1;
+        });
+        using (hub.StartRequestSession())
+        {
+            hub.CaptureMessage("message");
+        }
+        var config = MonitorConfig.Crontab(crontab);
+        config.Timezone = timezone;
+        Assert.NotNull(hub.Client!.CaptureCheckIn(new CheckIn(slug, CheckInStatus.Ok) { Config = config }));
+        Assert.NotNull(hub.CaptureFeedback(new Feedback("call ada@example.com " + new string('f', 100))
+        {
+            Name = "Ada ada@example.com",
+            Url = "https://shop.example/?u=ada@example.com&" + new string('q', 100),
+        }));
+        using (hub.SpanBuilder("mail ada@example.com").Start())
+        {
+        }
+        await hub.FlushAsync(Wait);
+
+        foreach (var r in ingest.Requests("/v1/logs").Concat(ingest.Requests("/v1/traces")))
+        {
+            var resource = Resource(r);
+            Assert.Equal(Release, resource["service.version"]);
+            Assert.Equal(Cut(environment), resource["deployment.environment.name"]);
+            Assert.Equal("web-ada@example.com", resource["host.name"]);
+        }
+        var sessions = Assert.Single(ingest.Requests("/v1/sessions")).Body;
+        Assert.Equal(Release, sessions["release"]);
+        Assert.Equal(Cut(environment), sessions["environment"]);
+
+        var checkIn = Assert.Single(ingest.Requests("/v1/check-ins/" + Cut(slug))).Body;
+        Assert.Equal(Cut(environment), checkIn["environment"]);
+        Assert.Equal(Cut(crontab), Map(Map(checkIn["monitor_config"])["schedule"])["value"]);
+        Assert.Equal(Cut(timezone), Map(checkIn["monitor_config"])["timezone"]);
+
+        var feedback = Assert.Single(ingest.Requests("/v1/feedback")).Body;
+        Assert.Equal(Release, feedback["release"]);
+        Assert.Equal(Cut(environment), feedback["environment"]);
+        Assert.Equal(Cut("call [REDACTED:email] " + new string('f', 100)), feedback["message"]);
+        Assert.Equal("Ada [REDACTED:email]", feedback["name"]);
+        Assert.Equal(Cut("https://shop.example/?u=[REDACTED:email]&" + new string('q', 100)), feedback["url"]);
+
+        Assert.Equal("mail [REDACTED:email]", Assert.Single(Spans(ingest.Requests("/v1/traces")))["name"]);
+    }
+
+    [Fact]
     public void ValuesReadAtMostTenThousandObjects()
     {
         // 1 + 100 + 10,000 lists: after 1 + 99 × 101 of them, the last list of lists is not read.
@@ -265,14 +328,19 @@ public class GuaranteesTests
         Assert.Null(Kept(null, baggage + "a", baggageOf: true));
         Assert.Null(Kept("fw=1\u0085x=2", null));
         Assert.Null(Kept(null, "k=1\u0000", baggageOf: true));
-        Assert.Equal("fw=1,\tx=2", Kept("fw=1,\tx=2", null)); // a header may hold a tab
+        Assert.Null(Kept("fw=1\u007f", null));
+        Assert.Equal("fw=1,\tx=2", Kept("fw=1,\tx=2", null)); // a tab is W3C list whitespace
+        Assert.Equal("k=1\t,\tj=2", Kept(null, "k=1\t,\tj=2", baggageOf: true));
 
         Assert.NotNull(Span.ParseTraceparent(" " + Parent + " "));
         foreach (var bad in new[]
         {
             "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", // version 00 only
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-00", // nothing after the flags
-            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", // lower-case hex
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", // lower-case hex: ignored, not lowered
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00F067AA0BA902B7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0A",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7", // four fields
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1",
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0g",
         })

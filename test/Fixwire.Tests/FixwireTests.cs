@@ -60,6 +60,56 @@ public class FixwireTests
     }
 
     [Fact]
+    public void InitNeverThrows()
+    {
+        var was = Console.Error;
+        var said = new StringWriter();
+        Console.SetError(said);
+        try
+        {
+            // A malformed DSN is said on stderr, debug or not (without the key), and the SDK stays off.
+            foreach (var bad in new[] { "ingest.fixwire.io", "fw_pk_live_secret@ingest.fixwire.io", "https://ingest.fixwire.io", "ftp://secret@host", "https://@host" })
+            {
+                Assert.False(new Client(new FixwireOptions { Dsn = bad, CaptureUnhandledExceptions = false }).Enabled);
+            }
+            using (FixwireSdk.Init(o => o.Dsn = "https://:secret@ingest.fixwire.io"))
+            {
+                Assert.False(FixwireSdk.IsEnabled);
+                Assert.Null(FixwireSdk.CaptureMessage("nowhere"));
+            }
+            Assert.Equal(6, said.ToString().Split("fixwire: the DSN must look like https://<key>@<host>; Fixwire is off").Length - 1);
+            Assert.DoesNotContain("secret", said.ToString(), StringComparison.Ordinal);
+
+            // So is an option HttpClient or a timer can't take; the longest they take are used.
+            Assert.False(Enabled(o => o.Timeout = TimeSpan.FromMilliseconds(int.MaxValue + 1.0)));
+            Assert.Contains("fixwire: Timeout must be at most 24 days; Fixwire is off", said.ToString(), StringComparison.Ordinal);
+            Assert.True(Enabled(o => o.Timeout = TimeSpan.FromMilliseconds(int.MaxValue)));
+            Assert.False(Enabled(o => o.SessionInterval = TimeSpan.FromMilliseconds(uint.MaxValue)));
+            Assert.Contains("fixwire: SessionInterval must be at most 49 days; Fixwire is off", said.ToString(), StringComparison.Ordinal);
+            Assert.True(Enabled(o => o.SessionInterval = TimeSpan.FromMilliseconds(uint.MaxValue - 1.0)));
+            Assert.True(Enabled(o =>
+            {
+                o.Release = null; // no release: no sessions, no timer
+                o.SessionInterval = TimeSpan.FromDays(365);
+            }));
+        }
+        finally
+        {
+            Console.SetError(was);
+        }
+
+        static bool Enabled(Action<FixwireOptions> configure)
+        {
+            using var c = new FakeIngest().Hub(o =>
+            {
+                o.Release = "shop@1.2.0";
+                configure(o);
+            }).Client!;
+            return c.Enabled;
+        }
+    }
+
+    [Fact]
     public async Task CapturesExceptionsWithTheirInnerExceptions()
     {
         var ingest = new FakeIngest();
@@ -496,6 +546,34 @@ public class FixwireTests
             hub3.CaptureMessage("down");
             Assert.True(await hub3.FlushAsync(Wait));
             Assert.Equal(4, down.Requests("/v1/logs").Count);
+        }
+        finally
+        {
+            Transport.BackoffUnit = TimeSpan.FromSeconds(1);
+        }
+    }
+
+    [Fact]
+    public async Task SendsARequestAtMostFourTimes()
+    {
+        // A 429's retry counts toward the same 4 sends as those after a 5xx; a fifth would succeed.
+        Transport.BackoffUnit = TimeSpan.FromMilliseconds(10);
+        try
+        {
+            var limited = new Dictionary<string, string> { ["Fixwire-Rate-Limits"] = "1:error" };
+            var ingest = new FakeIngest
+            {
+                Answer = (n, _) => n switch
+                {
+                    0 or 2 => (429, limited),
+                    1 or 3 => (503, new Dictionary<string, string>()),
+                    _ => (200, new Dictionary<string, string>()),
+                },
+            };
+            var hub = ingest.Hub();
+            hub.CaptureMessage("limited");
+            Assert.True(await hub.FlushAsync(Wait));
+            Assert.Equal(4, ingest.Requests("/v1/logs").Count);
         }
         finally
         {

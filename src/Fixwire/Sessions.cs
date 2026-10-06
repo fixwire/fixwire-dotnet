@@ -110,13 +110,14 @@ internal sealed class Sessions : IDisposable
             aggregates.Add(a);
         }
         // Users apart, and a count without them for each minute: a request holds MaxBuckets at most.
+        var o = _client.Options;
         for (var i = 0; i < aggregates.Count; i += MaxBuckets)
         {
             _client.SendJson("/v1/sessions", Transport.Session, new Dictionary<string, object?>
             {
                 ["sdk"] = Client.Sdk(),
-                ["release"] = _client.Options.Release,
-                ["environment"] = _client.Options.Environment,
+                ["release"] = Otlp.Clip(o.Release!, o.MaxValueLength), // the app's configuration: cut, not masked
+                ["environment"] = Otlp.Clip(o.Environment!, o.MaxValueLength),
                 ["aggregates"] = aggregates.GetRange(i, Math.Min(MaxBuckets, aggregates.Count - i)),
             });
         }

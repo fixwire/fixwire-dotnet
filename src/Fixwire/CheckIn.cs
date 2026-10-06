@@ -80,12 +80,13 @@ public sealed class MonitorConfig
     /// <summary>The schedule's time zone, such as <c>Europe/Berlin</c>.</summary>
     public string? Timezone { get; set; }
 
-    internal Dictionary<string, object?> ToWire()
+    /// <summary>The monitor's config as sent, its strings cut to max bytes (not masked: it is the app's configuration).</summary>
+    internal Dictionary<string, object?> ToWire(int max)
     {
-        var schedule = new Dictionary<string, object?> { ["type"] = _type, ["value"] = _value };
+        var schedule = new Dictionary<string, object?> { ["type"] = _type, ["value"] = _value is string s ? Otlp.Clip(s, max) : _value };
         if (_unit != null)
         {
-            schedule["unit"] = _unit;
+            schedule["unit"] = Otlp.Clip(_unit, max);
         }
         var m = new Dictionary<string, object?> { ["schedule"] = schedule };
         if (CheckInMargin > 0)
@@ -98,7 +99,7 @@ public sealed class MonitorConfig
         }
         if (Timezone != null)
         {
-            m["timezone"] = Timezone;
+            m["timezone"] = Otlp.Clip(Timezone, max);
         }
         return m;
     }

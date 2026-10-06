@@ -59,7 +59,9 @@ using var fixwire = FixwireSdk.Init(o =>
 });
 ```
 
-Without a DSN (and without `FIXWIRE_DSN`) the SDK does nothing. `Init` also
+Without a DSN (and without `FIXWIRE_DSN`) the SDK does nothing. `Init` never
+throws: a malformed DSN, or an option out of range, is said on stderr and the
+SDK stays off, so a typo in configuration can't stop the app. `Init` also
 reports exceptions nothing caught (and unobserved task exceptions), and the
 process's exit waits briefly for what is left to be sent.
 

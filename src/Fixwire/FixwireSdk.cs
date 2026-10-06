@@ -20,9 +20,11 @@ public static class FixwireSdk
     private static readonly object InitLock = new();
     private static bool _handlersInstalled;
 
-    /// <summary>Sets the SDK up; disposing the result flushes and stops it.</summary>
+    /// <summary>
+    /// Sets the SDK up; disposing the result flushes and stops it. It never throws: a malformed DSN,
+    /// or an option out of range, is said on stderr and the SDK stays off.
+    /// </summary>
     /// <param name="configure">Sets the options.</param>
-    /// <exception cref="ArgumentException">The DSN is malformed.</exception>
     public static IDisposable Init(Action<FixwireOptions> configure)
     {
         var o = new FixwireOptions();
@@ -30,9 +32,12 @@ public static class FixwireSdk
         return Init(o);
     }
 
-    /// <summary>Sets the SDK up: the main hub gets a client for the options; a second call replaces the first's.</summary>
+    /// <summary>
+    /// Sets the SDK up: the main hub gets a client for the options; a second call replaces the
+    /// first's. It never throws: a malformed DSN, or an option out of range, is said on stderr and
+    /// the SDK stays off.
+    /// </summary>
     /// <param name="options">The options.</param>
-    /// <exception cref="ArgumentException">The DSN is malformed.</exception>
     public static IDisposable Init(FixwireOptions options)
     {
         var client = new Client(options);

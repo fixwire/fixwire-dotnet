@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (.NET 10 and 8)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json # the SDK that builds
+          dotnet-version: 8.0.x # the oldest runtime the tests run on
+      - name: format
+        if: runner.os == 'Linux'
+        run: dotnet format Fixwire.slnx --verify-no-changes
+      - run: dotnet build Fixwire.slnx -c Release
+      - name: test (on .NET 10 and 8; the examples against a fake ingest)
+        run: dotnet test --solution Fixwire.slnx -c Release --no-build
+
+  framework:
+    name: .NET Framework 4.8 (the netstandard2.0 build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - run: dotnet run --project smoke -c Release

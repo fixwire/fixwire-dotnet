@@ -1,5 +1,7 @@
 # Fixwire for .NET
 
+[![CI](https://github.com/fixwire/fixwire-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/fixwire/fixwire-dotnet/actions/workflows/ci.yml)
+
 The Fixwire SDK for .NET: errors with their inner exceptions, traces,
 release health, cron monitors and feedback. The core targets
 `netstandard2.0` (.NET Framework 4.6.2+, Unity, Xamarin) and `net8.0`, and
@@ -174,8 +176,9 @@ cron job ([NightlyReport](examples/NightlyReport)).
 ## Building
 
 ```sh
-dotnet build && dotnet test                  # .NET 10 SDK
+dotnet build && dotnet test                  # .NET 10 SDK, and the .NET 8 runtime
 dotnet format Fixwire.slnx --verify-no-changes
+cd smoke && dotnet run                       # Windows: the library on .NET Framework
 ```
 
 ## License

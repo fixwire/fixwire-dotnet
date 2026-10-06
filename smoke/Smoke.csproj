@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The library on .NET Framework, through its netstandard2.0 build, as an app there runs it: CI
+    runs it on Windows, where the tests (ASP.NET Core) can't. An error goes to a fake ingest, its
+    card number masked on the way. Run with: dotnet run (in this directory).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);CA1303;CA2007;CA1031;CA1849;CA1835</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../src/Fixwire/Fixwire.csproj" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

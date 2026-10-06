@@ -11,7 +11,7 @@
     <Authors>Fixwire</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://fixwire.io</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/fixwire/fixwire</RepositoryUrl>
+    <RepositoryUrl>https://github.com/fixwire/fixwire-dotnet</RepositoryUrl>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
 </Project>

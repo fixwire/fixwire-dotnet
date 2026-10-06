@@ -887,6 +887,70 @@ public class FixwireTests
     }
 
     [Fact]
+    public void BudgetForgetsTheLeastRecentlySeen()
+    {
+        // One event an issue: a remembered issue holds the next back, a forgotten one starts afresh.
+        var budget = new Budget(new ErrorBudget { PerIssueBurst = 1, PerIssuePerMinute = 0, PerMinute = 1e9 });
+        var now = DateTimeOffset.UtcNow;
+        int Allow(int issue)
+        {
+            now = now.AddTicks(1);
+            return budget.Allow($"issue {issue}", now);
+        }
+        const int Max = 1024;
+        for (var i = 0; i < Max; i++)
+        {
+            Assert.Equal(0, Allow(i));
+        }
+        for (var i = 0; i < Max; i++)
+        {
+            Assert.Equal(-1, Allow(i));
+        }
+        // Seen again, 0 leaves 1 the least recently seen: the 1,025th issue forgets it, and only it.
+        Assert.Equal(-1, Allow(0));
+        Assert.Equal(0, Allow(Max));
+        foreach (var i in Enumerable.Range(0, Max + 1).Where(i => i != 1))
+        {
+            Assert.Equal(-1, Allow(i));
+        }
+        Assert.Equal(0, Allow(1)); // forgotten: a fresh budget
+        // That forgot 0, the least recently seen since; 0 forgets 2.
+        Assert.Equal(0, Allow(0));
+        Assert.Equal(0, Allow(2));
+        Assert.Equal(-1, Allow(Max));
+    }
+
+    [Fact]
+    public void BudgetForgetsInConstantTime()
+    {
+        // Past the issues remembered, each new one forgets the least recently seen without a scan.
+        static TimeSpan Time(int count)
+        {
+            // Each issue is made as it comes: made beforehand, 200,000 would not fit the cache 100,000 fit.
+            var budget = new Budget(new ErrorBudget());
+            var now = DateTimeOffset.UtcNow;
+            var sw = Stopwatch.StartNew();
+            for (var i = 0; i < count; i++)
+            {
+                budget.Allow($"issue {i}", now);
+            }
+            return sw.Elapsed;
+        }
+        Time(10_000); // warms up
+        // The best of runs taken in turn, at least 5 and up to 20 for a quiet moment: a busy machine slows both alike.
+        var (once, twice) = (TimeSpan.MaxValue, TimeSpan.MaxValue);
+        for (var round = 1; round <= 20 && (round <= 5 || twice.Ticks >= once.Ticks * 3); round++)
+        {
+            once = TimeSpan.FromTicks(Math.Min(once.Ticks, Time(100_000).Ticks));
+            twice = TimeSpan.FromTicks(Math.Min(twice.Ticks, Time(200_000).Ticks));
+        }
+        Assert.True(once < TimeSpan.FromMilliseconds(100), "100,000 issues took " + once.TotalMilliseconds + " ms");
+        Assert.True(
+            twice.Ticks < once.Ticks * 3,
+            "200,000 issues took " + twice.TotalMilliseconds + " ms, 100,000 " + once.TotalMilliseconds + " ms");
+    }
+
+    [Fact]
     public async Task TracesOutgoingRequests()
     {
         var ingest = new FakeIngest();

@@ -4,6 +4,10 @@ All notable changes to the Fixwire .NET SDK are listed here. Versions follow [Se
 Versioning](https://semver.org); before 1.0, a minor version may change the
 API.
 
+## [Unreleased]
+
+- The error budget forgets the least recently seen of its 1,024 issues in constant time, reusing its memory: a new issue no longer scans them all.
+
 ## [0.1.1] - 2026-10-06
 
 - `Init` (and `new Client`, `AddFixwire`) never throws: a malformed DSN (it threw `ArgumentException`), a `Timeout` over 24 days or a `SessionInterval` over 49 days is said on stderr, debug or not, and the SDK stays off.

@@ -30,8 +30,18 @@ internal sealed class Budget
     {
         public double Tokens = tokens;
         public DateTimeOffset Updated = now;
-        public DateTimeOffset Seen = now;
         public int Suppressed;
+
+        /// <summary>Its issue in the order issues were last seen; none for the budget across issues.</summary>
+        public LinkedListNode<string>? Seen;
+
+        /// <summary>Full again, as new.</summary>
+        public void Refill(double tokens, DateTimeOffset now)
+        {
+            Tokens = tokens;
+            Updated = now;
+            Suppressed = 0;
+        }
 
         public bool Take(double burst, double perMinute, DateTimeOffset at)
         {
@@ -49,6 +59,9 @@ internal sealed class Budget
     private readonly ErrorBudget _options;
     private readonly Bucket _all;
     private readonly Dictionary<string, Bucket> _issues = new();
+
+    /// <summary>The issues, the most recently seen first: the least recently seen is forgotten first.</summary>
+    private readonly LinkedList<string> _seen = new();
     private readonly object _lock = new();
 
     public Budget(ErrorBudget options)
@@ -71,12 +84,22 @@ internal sealed class Budget
             {
                 if (_issues.Count >= MaxIssues)
                 {
-                    ForgetOldest();
+                    // The least recently seen issue's bucket, full again, serves this one: nothing is allocated.
+                    b = ForgetOldest();
+                    b.Refill(burst, now);
+                    b.Seen!.Value = issue;
                 }
-                b = new Bucket(burst, now);
+                else
+                {
+                    b = new Bucket(burst, now) { Seen = new LinkedListNode<string>(issue) };
+                }
                 _issues[issue] = b;
             }
-            b.Seen = now;
+            else
+            {
+                _seen.Remove(b.Seen!);
+            }
+            _seen.AddFirst(b.Seen!);
             var perMinute = Math.Max(_options.PerMinute, 1);
             if (b.Take(burst, Math.Max(_options.PerIssuePerMinute, 0), now) && _all.Take(perMinute, perMinute, now))
             {
@@ -101,22 +124,14 @@ internal sealed class Budget
         }
     }
 
-    private void ForgetOldest()
+    /// <summary>Forgets the least recently seen issue, and gives its bucket back to reuse.</summary>
+    private Bucket ForgetOldest()
     {
-        string? oldest = null;
-        var at = DateTimeOffset.MaxValue;
-        foreach (var kv in _issues)
-        {
-            if (kv.Value.Seen < at)
-            {
-                oldest = kv.Key;
-                at = kv.Value.Seen;
-            }
-        }
-        if (oldest != null)
-        {
-            _issues.Remove(oldest);
-        }
+        var oldest = _seen.Last!.Value;
+        _seen.RemoveLast();
+        var b = _issues[oldest];
+        _issues.Remove(oldest);
+        return b;
     }
 
     /// <summary>
